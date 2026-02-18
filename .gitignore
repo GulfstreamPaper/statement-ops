@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+statement_app.db
+uploads/
+out/
+.env
+.venv/

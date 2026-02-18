@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Send Statement Now</h2>
+    <form method="post">
+      <div class="row">
+        <div>
+          <label>Customer or Group</label>
+          <input id="selectedRecipientName" placeholder="Select customer or group" readonly />
+          <input type="hidden" name="recipient_id" id="selectedRecipientId" />
+          <button type="button" class="secondary" id="openRecipientPicker">Select</button>
+        </div>
+        <div>
+          <label>Invoice File (optional)</label>
+          <select name="invoice_file_id">
+            <option value="">Use default (latest upload or path)</option>
+            {% for f in invoice_files %}
+              <option value="{{ f['id'] }}">{{ f['filename'] }} - {{ f['uploaded_at'] }}</option>
+            {% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="actions">
+        <button type="submit" name="action" value="send">Send Statement</button>
+        <button type="submit" class="secondary" name="action" value="download" formtarget="_blank">Download Statement</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="modal" id="recipientPickerModal">
+    <div class="modal-card">
+      <h3>Select Recipient</h3>
+      <div class="tabs">
+        <button class="tab active" type="button" data-tab="picker-groups">Groups</button>
+        <button class="tab" type="button" data-tab="picker-singles">Single</button>
+      </div>
+
+      <div class="tab-panel active" id="picker-groups">
+        <div class="row">
+          <div>
+            <label>Search</label>
+            <input id="groupPickerSearch" placeholder="Search groups" />
+          </div>
+        </div>
+        <div class="picker-list">
+          {% for g in groups %}
+            <div class="picker-item" data-id="{{ g['id'] }}" data-name="{{ g['group_name'] }}" data-search="{{ g['group_name'] | lower }}">
+              {{ g['group_name'] }}
+            </div>
+          {% else %}
+            <p><small>No groups yet.</small></p>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="tab-panel" id="picker-singles">
+        <div class="row">
+          <div>
+            <label>Search</label>
+            <input id="singlePickerSearch" placeholder="Search customers" />
+          </div>
+        </div>
+        <div class="picker-list">
+          {% for s in singles %}
+            <div class="picker-item" data-id="{{ s['id'] }}" data-name="{{ s['group_name'] }}" data-search="{{ s['group_name'] | lower }}">
+              {{ s['group_name'] }}
+            </div>
+          {% else %}
+            <p><small>No customers yet.</small></p>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="button" class="secondary" id="closeRecipientPicker">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const pickerModal = document.getElementById('recipientPickerModal');
+    const openPicker = document.getElementById('openRecipientPicker');
+    const closePicker = document.getElementById('closeRecipientPicker');
+    const selectedName = document.getElementById('selectedRecipientName');
+    const selectedId = document.getElementById('selectedRecipientId');
+
+    if (openPicker) {
+      openPicker.addEventListener('click', () => {
+        pickerModal.classList.add('active');
+      });
+    }
+    if (closePicker) {
+      closePicker.addEventListener('click', () => {
+        pickerModal.classList.remove('active');
+      });
+    }
+
+    const pickerTabs = pickerModal.querySelectorAll('.tab');
+    const pickerPanels = pickerModal.querySelectorAll('.tab-panel');
+    pickerTabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        pickerTabs.forEach((btn) => btn.classList.remove('active'));
+        pickerPanels.forEach((panel) => panel.classList.remove('active'));
+        tab.classList.add('active');
+        const target = document.getElementById(tab.dataset.tab);
+        if (target) target.classList.add('active');
+      });
+    });
+
+    function bindPickerSearch(inputId, listSelector) {
+      const input = document.getElementById(inputId);
+      const items = document.querySelectorAll(listSelector);
+      if (!input) return;
+      input.addEventListener('input', () => {
+        const query = (input.value || '').toLowerCase();
+        items.forEach((item) => {
+          item.style.display = item.dataset.search.includes(query) ? '' : 'none';
+        });
+      });
+    }
+    bindPickerSearch('groupPickerSearch', '#picker-groups .picker-item');
+    bindPickerSearch('singlePickerSearch', '#picker-singles .picker-item');
+
+    document.querySelectorAll('.picker-item').forEach((item) => {
+      item.addEventListener('click', () => {
+        selectedName.value = item.dataset.name;
+        selectedId.value = item.dataset.id;
+        pickerModal.classList.remove('active');
+      });
+    });
+  </script>
+{% endblock %}

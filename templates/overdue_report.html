@@ -1,0 +1,263 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Overdue Report</h2>
+    <div class="row">
+      <div>
+        <p><small>Source file: {{ invoice_label or 'No invoice file found' }}</small></p>
+        {% if run %}
+          <p><small>Last run: {{ run['created_at'] }} ({{ run['status'] }})</small></p>
+        {% else %}
+          <p><small>No report run yet.</small></p>
+        {% endif %}
+      </div>
+      <div>
+        <form method="post" action="{{ url_for('overdue_report_run') }}">
+          <button type="submit" class="secondary">Run Report Now</button>
+        </form>
+        <p style="margin-top: 8px;">
+          <a class="button-link export" href="{{ url_for('overdue_report_export') }}">Export to Excel</a>
+        </p>
+      </div>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Group</th>
+          <th>Terms</th>
+          <th>Overdue Invoices</th>
+          <th>Oldest Overdue (days)</th>
+          <th>Overdue Amount</th>
+          <th>Short Paid</th>
+          <th>Short Paid Amount</th>
+          <th>Skipped</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in rows %}
+          <tr>
+            <td>{{ row['group_name'] }}</td>
+            <td>{{ term_labels.get(row['terms_code'], row['terms_code']) }}</td>
+            <td>{{ row['overdue_count'] }}</td>
+            <td>{{ row['days_overdue'] }}</td>
+            <td>${{ "{:,.2f}".format(row['overdue_amount']) }}</td>
+            <td>{{ row['short_paid_count'] or 0 }}</td>
+            <td>${{ "{:,.2f}".format(row['short_paid_amount'] or 0) }}</td>
+            <td>{{ row['skipped_count'] }}</td>
+            <td class="actions">
+              {% if row['recipient_id'] %}
+                <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=row['recipient_id']) }}">Download</a>
+                <form method="post" action="{{ url_for('overdue_report_send', recipient_id=row['recipient_id']) }}">
+                  <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
+                  <button type="submit" class="warning {% if row['sent_overdue'] %}sent{% endif %}">Overdue</button>
+                </form>
+                {% if row['skipped_count'] > 0 %}
+                  <button type="button" class="skipped skipped-btn {% if row['sent_skipped'] %}sent{% endif %}"
+                          data-recipient-id="{{ row['recipient_id'] }}"
+                          data-run-id="{{ run['id'] if run else '' }}"
+                          data-skipped='{{ row["skipped_invoices"] | tojson }}'>
+                    Skipped
+                  </button>
+                {% endif %}
+                {% if row['short_paid_count'] > 0 %}
+                  <button type="button" class="short-paid short-paid-btn {% if row['sent_short_paid'] %}sent{% endif %}"
+                          data-recipient-id="{{ row['recipient_id'] }}"
+                          data-run-id="{{ run['id'] if run else '' }}"
+                          data-short-paid='{{ row["short_paid_invoices"] | tojson }}'>
+                    Short Paid
+                  </button>
+                {% endif %}
+              {% else %}
+                <small>Missing recipient</small>
+              {% endif %}
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="9">No overdue groups found.</td></tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr>
+          <th colspan="2">Totals</th>
+          <th>{{ total_overdue_count }}</th>
+          <th>-</th>
+          <th>${{ "{:,.2f}".format(total_overdue_amount) }}</th>
+          <th>{{ total_short_paid_count }}</th>
+          <th>${{ "{:,.2f}".format(total_short_paid_amount) }}</th>
+          <th></th>
+          <th></th>
+        </tr>
+      </tfoot>
+    </table>
+    <p><small>Note: Bill to Bill groups use the next invoice ship date as the due date for prior invoices.</small></p>
+  </div>
+
+  <div id="skippedModal" class="modal">
+    <div class="modal-card">
+      <h3>Send Skipped Notice</h3>
+      <form id="skippedForm" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="run_id" id="skippedRunId" value="" />
+        <div id="skippedFiles"></div>
+        <div class="actions">
+          <button type="submit" class="skipped">Send Skipped Notice</button>
+          <button type="button" class="secondary" id="skippedCancel">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="shortPaidModal" class="modal">
+    <div class="modal-card">
+      <h3>Send Short Paid Notice</h3>
+      <form id="shortPaidForm" method="post" enctype="multipart/form-data">
+        <input type="hidden" name="run_id" id="shortPaidRunId" value="" />
+        <div id="shortPaidFiles"></div>
+        <div class="actions">
+          <button type="submit" class="short-paid">Send Short Paid Notice</button>
+          <button type="button" class="secondary" id="shortPaidCancel">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const skippedModal = document.getElementById('skippedModal');
+    const skippedForm = document.getElementById('skippedForm');
+    const skippedFiles = document.getElementById('skippedFiles');
+    const skippedRunId = document.getElementById('skippedRunId');
+    const skippedCancel = document.getElementById('skippedCancel');
+
+    const shortPaidModal = document.getElementById('shortPaidModal');
+    const shortPaidForm = document.getElementById('shortPaidForm');
+    const shortPaidFiles = document.getElementById('shortPaidFiles');
+    const shortPaidRunId = document.getElementById('shortPaidRunId');
+    const shortPaidCancel = document.getElementById('shortPaidCancel');
+
+    function openSkippedModal(button) {
+      const recipientId = button.dataset.recipientId;
+      const runId = button.dataset.runId || '';
+      const skipped = JSON.parse(button.dataset.skipped || '[]');
+
+      skippedForm.action = `/overdue-report/skipped/${recipientId}`;
+      skippedRunId.value = runId;
+      skippedFiles.innerHTML = '';
+
+      skipped.forEach((inv, idx) => {
+        const wrapper = document.createElement('div');
+        const label = document.createElement('label');
+        const orderId = inv.order_id || `Invoice ${idx + 1}`;
+        const shipDate = inv.ship_date ? ` (Ship ${inv.ship_date})` : '';
+        const location = inv.location ? ` - ${inv.location}` : '';
+        label.textContent = `${orderId}${shipDate}${location}`;
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'copy-btn';
+        copyBtn.textContent = 'Copy #';
+        copyBtn.addEventListener('click', () => {
+          navigator.clipboard.writeText(orderId);
+          copyBtn.textContent = 'Copied';
+          setTimeout(() => (copyBtn.textContent = 'Copy #'), 1200);
+        });
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.name = 'invoice_files';
+        input.accept = '.pdf';
+        input.required = true;
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'invoice_ids';
+        hidden.value = orderId;
+
+        wrapper.appendChild(label);
+        wrapper.appendChild(copyBtn);
+        wrapper.appendChild(input);
+        wrapper.appendChild(hidden);
+        skippedFiles.appendChild(wrapper);
+      });
+
+      skippedModal.classList.add('active');
+    }
+
+    function openShortPaidModal(button) {
+      const recipientId = button.dataset.recipientId;
+      const runId = button.dataset.runId || '';
+      const shortPaid = JSON.parse(button.dataset.shortPaid || '[]');
+
+      shortPaidForm.action = `/overdue-report/short-paid/${recipientId}`;
+      shortPaidRunId.value = runId;
+      shortPaidFiles.innerHTML = '';
+
+      shortPaid.forEach((inv, idx) => {
+        const wrapper = document.createElement('div');
+        const label = document.createElement('label');
+        const orderId = inv.order_id || `Invoice ${idx + 1}`;
+        const shipDate = inv.ship_date ? ` (Ship ${inv.ship_date})` : '';
+        const location = inv.location ? ` - ${inv.location}` : '';
+        label.textContent = `${orderId}${shipDate}${location}`;
+        const copyBtn = document.createElement('button');
+        copyBtn.type = 'button';
+        copyBtn.className = 'copy-btn';
+        copyBtn.textContent = 'Copy #';
+        copyBtn.addEventListener('click', () => {
+          navigator.clipboard.writeText(orderId);
+          copyBtn.textContent = 'Copied';
+          setTimeout(() => (copyBtn.textContent = 'Copy #'), 1200);
+        });
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.name = 'invoice_files';
+        input.accept = '.pdf';
+        input.required = true;
+        const hidden = document.createElement('input');
+        hidden.type = 'hidden';
+        hidden.name = 'invoice_ids';
+        hidden.value = orderId;
+
+        wrapper.appendChild(label);
+        wrapper.appendChild(copyBtn);
+        wrapper.appendChild(input);
+        wrapper.appendChild(hidden);
+        shortPaidFiles.appendChild(wrapper);
+      });
+
+      shortPaidModal.classList.add('active');
+    }
+
+    document.querySelectorAll('.skipped-btn').forEach((btn) => {
+      btn.addEventListener('click', () => openSkippedModal(btn));
+    });
+
+    document.querySelectorAll('.short-paid-btn').forEach((btn) => {
+      btn.addEventListener('click', () => openShortPaidModal(btn));
+    });
+
+    skippedCancel.addEventListener('click', () => {
+      skippedModal.classList.remove('active');
+      skippedForm.action = '';
+      skippedFiles.innerHTML = '';
+    });
+
+    skippedModal.addEventListener('click', (event) => {
+      if (event.target === skippedModal) {
+        skippedModal.classList.remove('active');
+        skippedForm.action = '';
+        skippedFiles.innerHTML = '';
+      }
+    });
+
+    shortPaidCancel.addEventListener('click', () => {
+      shortPaidModal.classList.remove('active');
+      shortPaidForm.action = '';
+      shortPaidFiles.innerHTML = '';
+    });
+
+    shortPaidModal.addEventListener('click', (event) => {
+      if (event.target === shortPaidModal) {
+        shortPaidModal.classList.remove('active');
+        shortPaidForm.action = '';
+        shortPaidFiles.innerHTML = '';
+      }
+    });
+  </script>
+{% endblock %}

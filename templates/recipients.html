@@ -1,0 +1,150 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Add Recipient</h2>
+    <form method="post">
+      <div class="row">
+        <div>
+          <label>Group Name</label>
+          <input name="group_name" required />
+        </div>
+        <div>
+          <label>Emails (comma separated)</label>
+          <input name="email_to" required />
+        </div>
+        <div>
+          <label>Terms</label>
+          <select name="terms_code">
+            {% for code, label in term_options %}
+              <option value="{{ code }}" {% if code == 'net_30' %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Location</label>
+          <input name="location" placeholder="Optional" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Frequency</label>
+          <select name="frequency">
+            <option value="weekly">Weekly</option>
+            <option value="biweekly">Biweekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="none">None</option>
+          </select>
+        </div>
+        <div>
+          <label>Day of Week</label>
+          <select name="day_of_week">
+            <option value="0">Monday</option>
+            <option value="1">Tuesday</option>
+            <option value="2">Wednesday</option>
+            <option value="3">Thursday</option>
+            <option value="4">Friday</option>
+            <option value="5">Saturday</option>
+            <option value="6">Sunday</option>
+          </select>
+        </div>
+        <div>
+          <label>Day of Month (for monthly)</label>
+          <input name="day_of_month" type="number" value="1" min="1" max="28" />
+        </div>
+        <div>
+          <label>Active</label>
+          <input name="active" type="checkbox" checked />
+        </div>
+      </div>
+      <button type="submit">Save Recipient</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Bulk Upload Recipients</h2>
+    <p><small>Upload .csv or .xlsx with columns: group_name, email_to, terms, location, frequency, day_of_week, day_of_month, active.</small></p>
+    <p><small>Terms options: Net 7, Net 15, Net 20, Net 30, Net 45, COD, Bill to Bill, Month to Month, Week to Week.</small></p>
+    <p><a class="button-link" href="{{ url_for('recipients_template') }}">Download Template</a></p>
+    <form method="post" action="{{ url_for('recipients_import') }}" enctype="multipart/form-data">
+      <div class="row">
+        <div>
+          <label>Recipient File</label>
+          <input type="file" name="import_file" accept=".csv,.xlsx" required />
+        </div>
+      </div>
+      <button type="submit">Import Recipients</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Recipients</h2>
+    <div class="row">
+      <div>
+        <label>Search</label>
+        <input id="recipientSearch" placeholder="Search group, email, terms" />
+      </div>
+      <div>
+        <label>Frequency</label>
+        <select id="recipientFrequency">
+          <option value="">All</option>
+          <option value="weekly">Weekly</option>
+          <option value="biweekly">Biweekly</option>
+          <option value="monthly">Monthly</option>
+          <option value="none">None</option>
+        </select>
+      </div>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Group</th>
+          <th>Email</th>
+          <th>Terms</th>
+          <th>Frequency</th>
+          <th>Last Sent</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in recipients %}
+          <tr data-search="{{ (r['group_name'] ~ ' ' ~ r['email_to'] ~ ' ' ~ term_labels.get(r['terms_code'], r['terms_code']) ~ ' ' ~ r['frequency']) | lower }}" data-frequency="{{ r['frequency'] }}">
+            <td>{{ r['group_name'] }}</td>
+            <td>{{ r['email_to'] }}</td>
+            <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
+            <td>{{ r['frequency'] }}</td>
+            <td>{{ r['last_sent'] or '-' }}</td>
+            <td class="actions">
+              <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download Statement</a>
+              <a class="button-link edit" href="{{ url_for('edit_recipient', recipient_id=r['id']) }}">Edit</a>
+              <form method="post" action="{{ url_for('delete_recipient', recipient_id=r['id']) }}" onsubmit="return confirm('Delete recipient?')">
+                <button type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">No recipients yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const recipientSearch = document.getElementById('recipientSearch');
+    const recipientFrequency = document.getElementById('recipientFrequency');
+    const recipientRows = document.querySelectorAll('table.table tbody tr[data-search]');
+
+    function filterRecipients() {
+      const query = recipientSearch.value.toLowerCase();
+      const freq = recipientFrequency.value;
+      recipientRows.forEach((row) => {
+        const matchesText = row.dataset.search.includes(query);
+        const matchesFreq = !freq || row.dataset.frequency === freq;
+        row.style.display = matchesText && matchesFreq ? '' : 'none';
+      });
+    }
+
+    recipientSearch.addEventListener('input', filterRecipients);
+    recipientFrequency.addEventListener('change', filterRecipients);
+    filterRecipients();
+  </script>
+{% endblock %}

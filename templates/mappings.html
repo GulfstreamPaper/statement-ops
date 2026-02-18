@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Add Mapping</h2>
+    <form method="post">
+      <div class="row">
+        <div>
+          <label>Customer Name (from invoice)</label>
+          <input name="customer_name" required />
+        </div>
+        <div>
+          <label>Recipient Group</label>
+          <input name="recipient_group" list="recipient_groups" placeholder="Start typing group name" required />
+          <datalist id="recipient_groups">
+            {% for r in recipients %}
+              <option value="{{ r['group_name'] }}"></option>
+            {% endfor %}
+          </datalist>
+        </div>
+      </div>
+      <button type="submit">Save Mapping</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Bulk Upload Mappings</h2>
+    <p><small>Upload .csv or .xlsx with columns: customer_name, group_name (or recipient_id).</small></p>
+    <p><a class="button-link" href="{{ url_for('mappings_template') }}">Download Template</a></p>
+    <form method="post" action="{{ url_for('mappings_import') }}" enctype="multipart/form-data">
+      <div class="row">
+        <div>
+          <label>Mapping File</label>
+          <input type="file" name="import_file" accept=".csv,.xlsx" required />
+        </div>
+      </div>
+      <button type="submit">Import Mappings</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Mappings</h2>
+    <div class="row">
+      <div>
+        <label>Search</label>
+        <input id="mappingSearch" placeholder="Search customer or group" />
+      </div>
+      <div>
+        <label>Recipient Group</label>
+        <select id="mappingGroup">
+          <option value="">All</option>
+          {% for r in recipients %}
+            <option value="{{ r['group_name'] }}">{{ r['group_name'] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Customer Name</th>
+          <th>Recipient Group</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in mappings %}
+          {% set group_name = m['group_name'] %}
+          <tr data-search="{{ (m['customer_name'] ~ ' ' ~ group_name) | lower }}" data-group="{{ group_name }}">
+            <td>{{ m['customer_name'] }}</td>
+            <td>{{ group_name }}</td>
+            <td class="actions">
+              <a class="button-link edit" href="{{ url_for('edit_mapping', mapping_id=m['id']) }}">Edit</a>
+              <form method="post" action="{{ url_for('delete_mapping', mapping_id=m['id']) }}" onsubmit="return confirm('Delete mapping?')">
+                <button type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="3">No mappings yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if orphan_mappings %}
+  <div class="panel">
+    <h2>Missing Recipient Mappings</h2>
+    <p><small>These mappings point to a deleted recipient. You can delete them or re-map to an active recipient.</small></p>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Customer Name</th>
+          <th>Recipient Group</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in orphan_mappings %}
+          <tr data-search="{{ (m['customer_name'] ~ ' missing recipient') | lower }}" data-group="Missing recipient">
+            <td>{{ m['customer_name'] }}</td>
+            <td>Missing recipient</td>
+            <td class="actions">
+              <a class="button-link edit" href="{{ url_for('edit_mapping', mapping_id=m['id']) }}">Edit</a>
+              <form method="post" action="{{ url_for('delete_mapping', mapping_id=m['id']) }}" onsubmit="return confirm('Delete mapping?')">
+                <button type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="3">No missing mappings.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  <script>
+    const mappingSearch = document.getElementById('mappingSearch');
+    const mappingGroup = document.getElementById('mappingGroup');
+    const mappingRows = document.querySelectorAll('table.table tbody tr[data-search]');
+
+    function filterMappings() {
+      const query = mappingSearch.value.toLowerCase();
+      const group = mappingGroup.value;
+      mappingRows.forEach((row) => {
+        const matchesText = row.dataset.search.includes(query);
+        const matchesGroup = !group || row.dataset.group === group;
+        row.style.display = matchesText && matchesGroup ? '' : 'none';
+      });
+    }
+
+    mappingSearch.addEventListener('input', filterMappings);
+    mappingGroup.addEventListener('change', filterMappings);
+    filterMappings();
+  </script>
+{% endblock %}

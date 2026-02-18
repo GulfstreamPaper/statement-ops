@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel grid grid-2">
+    <div>
+      <h2>Overview</h2>
+      <p><strong>{{ customer_count }}</strong> customers</p>
+      <p><strong>{{ group_count }}</strong> groups</p>
+      <p>Today is <strong>{{ today.strftime('%B %d, %Y') }}</strong></p>
+    </div>
+    <div>
+      <h2>Due Today</h2>
+      {% if due %}
+        <ul>
+          {% for r in due %}
+            <li>{{ r['group_name'] }} <span class="badge">{{ r['frequency'] }}</span></li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p><small>No statements due today.</small></p>
+      {% endif %}
+      <form method="post" action="{{ url_for('run_scheduled') }}">
+        <button class="secondary" type="submit">Run Scheduled Now</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Recent Runs</h2>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Group</th>
+          <th>Type</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Sent</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for run in runs %}
+          <tr>
+            <td>{{ run['group_name'] }}</td>
+            <td>{{ run['run_type'] }}</td>
+            <td>{{ run['status'] }}</td>
+            <td>{{ run['created_at'] }}</td>
+            <td>{{ run['sent_at'] or '-' }}</td>
+            <td>{{ run['error'] or '-' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">No runs yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}

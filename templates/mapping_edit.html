@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Edit Mapping</h2>
+    <form method="post">
+      <div class="row">
+        <div>
+          <label>Customer Name (from invoice)</label>
+          <input name="customer_name" value="{{ mapping['customer_name'] }}" required />
+        </div>
+        <div>
+          <label>Recipient Group</label>
+          <input name="recipient_group" list="recipient_groups_edit" value="{{ mapping['group_name'] }}" required />
+          <datalist id="recipient_groups_edit">
+            {% for r in recipients %}
+              <option value="{{ r['group_name'] }}"></option>
+            {% endfor %}
+          </datalist>
+        </div>
+      </div>
+      <button type="submit">Save Changes</button>
+    </form>
+  </div>
+{% endblock %}

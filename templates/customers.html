@@ -1,0 +1,409 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Customers</h2>
+    <div class="tabs">
+      <button class="tab active" type="button" data-tab="tab-new">New</button>
+      <button class="tab" type="button" data-tab="tab-groups">Groups</button>
+      <button class="tab" type="button" data-tab="tab-all">All</button>
+    </div>
+  </div>
+
+  <div class="panel tab-panel active" id="tab-new">
+    <h2>New Customers</h2>
+    {% if invoice_label %}
+      <p><small>Source: {{ invoice_label }}</small></p>
+    {% else %}
+      <p><small>No uploaded invoice file found yet.</small></p>
+    {% endif %}
+    <div class="row">
+      <div>
+        <label>Search</label>
+        <input id="newCustomerSearch" placeholder="Search customer name" />
+      </div>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Customer Name</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for name in new_customers %}
+          <tr data-search="{{ name | lower }}">
+            <td>{{ name }}</td>
+            <td>
+              <button type="button" class="secondary" data-new-customer="{{ name }}">Add</button>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="2">No new customers found.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel tab-panel" id="tab-groups">
+    <h2>Create Group</h2>
+    <form method="post">
+      <input type="hidden" name="form_type" value="create_group" />
+      <div class="row">
+        <div>
+          <label>Group Name</label>
+          <input name="group_name" required />
+        </div>
+        <div>
+          <label>Emails (comma separated)</label>
+          <input name="email_to" required />
+        </div>
+        <div>
+          <label>Terms</label>
+          <select name="terms_code">
+            {% for code, label in term_options %}
+              <option value="{{ code }}" {% if code == 'net_30' %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Frequency</label>
+          <select name="frequency">
+            <option value="weekly">Weekly</option>
+            <option value="biweekly">Biweekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="none">None</option>
+          </select>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Day of Week</label>
+          <select name="day_of_week">
+            <option value="0">Monday</option>
+            <option value="1">Tuesday</option>
+            <option value="2">Wednesday</option>
+            <option value="3">Thursday</option>
+            <option value="4">Friday</option>
+            <option value="5">Saturday</option>
+            <option value="6">Sunday</option>
+          </select>
+        </div>
+        <div>
+          <label>Day of Month (for monthly)</label>
+          <input name="day_of_month" type="number" value="1" min="1" max="28" />
+        </div>
+        <div>
+          <label>Active</label>
+          <input name="active" type="checkbox" checked />
+        </div>
+        <div>
+          <label>Members</label>
+          <button type="button" class="secondary" id="openGroupMembers">Select Members</button>
+        </div>
+      </div>
+      <div class="member-summary" id="groupMemberSummary">No members selected.</div>
+      <button type="submit">Create Group</button>
+
+      <div class="modal" id="groupMembersModal">
+        <div class="modal-card">
+          <h3>Select Group Members</h3>
+          <div class="row">
+            <div>
+              <label>Search</label>
+              <input id="groupMemberSearch" placeholder="Search customers" />
+            </div>
+          </div>
+          <div class="member-list" id="groupMemberList">
+            {% for customer in singles %}
+              <label class="member-row" data-search="{{ customer['group_name'] | lower }}">
+                <input type="checkbox" name="member_ids" value="{{ customer['id'] }}" />
+                <span>{{ customer['group_name'] }}</span>
+              </label>
+            {% endfor %}
+          </div>
+          <div class="actions">
+            <button type="button" class="secondary" id="closeGroupMembers">Done</button>
+          </div>
+        </div>
+      </div>
+    </form>
+
+    <h2>Groups</h2>
+    <div class="row">
+      <div>
+        <label>Search</label>
+        <input id="groupSearch" placeholder="Search groups" />
+      </div>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Group Name</th>
+          <th>Members</th>
+          <th>Email</th>
+          <th>Terms</th>
+          <th>Frequency</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for g in groups %}
+          <tr data-search="{{ (g['group_name'] ~ ' ' ~ g['email_to']) | lower }}">
+            <td>{{ g['group_name'] }}</td>
+            <td>
+              <span>{{ group_member_counts.get(g['id'], 0) }}</span>
+              <small>{{ group_member_names.get(g['id'], '') }}</small>
+            </td>
+            <td>{{ g['email_to'] }}</td>
+            <td>{{ term_labels.get(g['terms_code'], g['terms_code']) }}</td>
+            <td>{{ g['frequency'] }}</td>
+            <td class="actions">
+              <a class="button-link edit" href="{{ url_for('edit_customer', recipient_id=g['id']) }}">Edit</a>
+              <form method="post" action="{{ url_for('delete_customer', recipient_id=g['id']) }}" onsubmit="return confirm('Delete group?')">
+                <button type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">No groups yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel tab-panel" id="tab-all">
+    <h2>All Customers</h2>
+    <div class="row">
+      <div>
+        <label>Search</label>
+        <input id="allSearch" placeholder="Search name or email" />
+      </div>
+      <div>
+        <label>Type</label>
+        <select id="allTypeFilter">
+          <option value="">All</option>
+          <option value="single">Single</option>
+          <option value="group">Group</option>
+        </select>
+      </div>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Email</th>
+          <th>Terms</th>
+          <th>Frequency</th>
+          <th>Group / Members</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in all_recipients %}
+          <tr data-search="{{ (r['group_name'] ~ ' ' ~ r['email_to']) | lower }}" data-type="{{ r['recipient_type'] }}">
+            <td>{{ r['group_name'] }}</td>
+            <td>{{ 'Group' if r['recipient_type'] == 'group' else 'Single' }}</td>
+            <td>{{ r['email_to'] }}</td>
+            <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
+            <td>{{ r['frequency'] }}</td>
+            <td>
+              {% if r['recipient_type'] == 'group' %}
+                <span>{{ group_member_counts.get(r['id'], 0) }} members</span>
+              {% else %}
+                {{ customer_groups.get(r['id'], '-') }}
+              {% endif %}
+            </td>
+            <td class="actions">
+              <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
+              <a class="button-link edit" href="{{ url_for('edit_customer', recipient_id=r['id']) }}">Edit</a>
+              <form method="post" action="{{ url_for('delete_customer', recipient_id=r['id']) }}" onsubmit="return confirm('Delete customer?')">
+                <button type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7">No customers yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="modal" id="newCustomerModal">
+    <div class="modal-card">
+      <h3>Add Customer</h3>
+      <form method="post">
+        <input type="hidden" name="form_type" value="create_single" />
+        <div class="row">
+          <div>
+            <label>Customer Name</label>
+            <input name="customer_name" id="newCustomerName" readonly />
+          </div>
+          <div>
+            <label>Emails (comma separated)</label>
+            <input name="email_to" required />
+          </div>
+          <div>
+            <label>Terms</label>
+            <select name="terms_code">
+              {% for code, label in term_options %}
+                <option value="{{ code }}" {% if code == 'net_30' %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label>Frequency</label>
+            <select name="frequency">
+              <option value="weekly">Weekly</option>
+              <option value="biweekly">Biweekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="none">None</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label>Day of Week</label>
+            <select name="day_of_week">
+              <option value="0">Monday</option>
+              <option value="1">Tuesday</option>
+              <option value="2">Wednesday</option>
+              <option value="3">Thursday</option>
+              <option value="4">Friday</option>
+              <option value="5">Saturday</option>
+              <option value="6">Sunday</option>
+            </select>
+          </div>
+          <div>
+            <label>Day of Month (for monthly)</label>
+            <input name="day_of_month" type="number" value="1" min="1" max="28" />
+          </div>
+          <div>
+            <label>Active</label>
+            <input name="active" type="checkbox" checked />
+          </div>
+        </div>
+        <div class="actions">
+          <button type="submit">Save Customer</button>
+          <button type="button" class="secondary" id="closeNewCustomer">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const tabs = document.querySelectorAll('.tab');
+    const panels = document.querySelectorAll('.tab-panel');
+
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        tabs.forEach((btn) => btn.classList.remove('active'));
+        panels.forEach((panel) => panel.classList.remove('active'));
+        tab.classList.add('active');
+        const target = document.getElementById(tab.dataset.tab);
+        if (target) target.classList.add('active');
+      });
+    });
+
+    const newSearch = document.getElementById('newCustomerSearch');
+    const newRows = document.querySelectorAll('#tab-new tbody tr[data-search]');
+    function filterNew() {
+      const query = (newSearch.value || '').toLowerCase();
+      newRows.forEach((row) => {
+        row.style.display = row.dataset.search.includes(query) ? '' : 'none';
+      });
+    }
+    if (newSearch) {
+      newSearch.addEventListener('input', filterNew);
+      filterNew();
+    }
+
+    const groupSearch = document.getElementById('groupSearch');
+    const groupRows = document.querySelectorAll('#tab-groups tbody tr[data-search]');
+    function filterGroups() {
+      const query = (groupSearch.value || '').toLowerCase();
+      groupRows.forEach((row) => {
+        row.style.display = row.dataset.search.includes(query) ? '' : 'none';
+      });
+    }
+    if (groupSearch) {
+      groupSearch.addEventListener('input', filterGroups);
+      filterGroups();
+    }
+
+    const allSearch = document.getElementById('allSearch');
+    const allTypeFilter = document.getElementById('allTypeFilter');
+    const allRows = document.querySelectorAll('#tab-all tbody tr[data-search]');
+    function filterAll() {
+      const query = (allSearch.value || '').toLowerCase();
+      const type = allTypeFilter.value;
+      allRows.forEach((row) => {
+        const matchesText = row.dataset.search.includes(query);
+        const matchesType = !type || row.dataset.type === type;
+        row.style.display = matchesText && matchesType ? '' : 'none';
+      });
+    }
+    if (allSearch) {
+      allSearch.addEventListener('input', filterAll);
+      allTypeFilter.addEventListener('change', filterAll);
+      filterAll();
+    }
+
+    const newModal = document.getElementById('newCustomerModal');
+    const newCustomerName = document.getElementById('newCustomerName');
+    document.querySelectorAll('[data-new-customer]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        newCustomerName.value = btn.dataset.newCustomer;
+        newModal.classList.add('active');
+      });
+    });
+    document.getElementById('closeNewCustomer').addEventListener('click', () => {
+      newModal.classList.remove('active');
+    });
+
+    const groupModal = document.getElementById('groupMembersModal');
+    const openGroupMembers = document.getElementById('openGroupMembers');
+    const closeGroupMembers = document.getElementById('closeGroupMembers');
+    const groupMemberSearch = document.getElementById('groupMemberSearch');
+    const groupMemberRows = document.querySelectorAll('#groupMemberList .member-row');
+    const groupMemberSummary = document.getElementById('groupMemberSummary');
+
+    function updateGroupSummary() {
+      const selected = [];
+      groupMemberRows.forEach((row) => {
+        const checkbox = row.querySelector('input[type="checkbox"]');
+        if (checkbox && checkbox.checked) {
+          selected.push(row.textContent.trim());
+        }
+      });
+      groupMemberSummary.textContent = selected.length ? selected.join(', ') : 'No members selected.';
+    }
+
+    if (openGroupMembers) {
+      openGroupMembers.addEventListener('click', () => {
+        groupModal.classList.add('active');
+      });
+    }
+    if (closeGroupMembers) {
+      closeGroupMembers.addEventListener('click', () => {
+        groupModal.classList.remove('active');
+        updateGroupSummary();
+      });
+    }
+    if (groupMemberSearch) {
+      groupMemberSearch.addEventListener('input', () => {
+        const query = (groupMemberSearch.value || '').toLowerCase();
+        groupMemberRows.forEach((row) => {
+          row.style.display = row.dataset.search.includes(query) ? 'flex' : 'none';
+        });
+      });
+    }
+    groupMemberRows.forEach((row) => {
+      const checkbox = row.querySelector('input[type="checkbox"]');
+      if (checkbox) {
+        checkbox.addEventListener('change', updateGroupSummary);
+      }
+    });
+    updateGroupSummary();
+  </script>
+{% endblock %}

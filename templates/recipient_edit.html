@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Edit Recipient</h2>
+    <form method="post">
+      <div class="row">
+        <div>
+          <label>Group Name</label>
+          <input name="group_name" value="{{ recipient['group_name'] }}" required />
+        </div>
+        <div>
+          <label>Emails (comma separated)</label>
+          <input name="email_to" value="{{ recipient['email_to'] }}" required />
+        </div>
+        <div>
+          <label>Terms</label>
+          {% set current_terms = recipient['terms_code'] or 'net_30' %}
+          <select name="terms_code">
+            {% for code, label in term_options %}
+              <option value="{{ code }}" {% if current_terms == code %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Location</label>
+          <input name="location" value="{{ recipient['location'] or '' }}" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Frequency</label>
+          <select name="frequency">
+            {% for opt in ['weekly','biweekly','monthly','none'] %}
+              <option value="{{ opt }}" {% if recipient['frequency'] == opt %}selected{% endif %}>{{ opt|capitalize }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Day of Week</label>
+          <select name="day_of_week">
+            {% for label, idx in [('Monday',0),('Tuesday',1),('Wednesday',2),('Thursday',3),('Friday',4),('Saturday',5),('Sunday',6)] %}
+              <option value="{{ idx }}" {% if recipient['day_of_week'] == idx %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Day of Month (for monthly)</label>
+          <input name="day_of_month" type="number" min="1" max="28" value="{{ recipient['day_of_month'] }}" />
+        </div>
+        <div>
+          <label>Active</label>
+          <input name="active" type="checkbox" {% if recipient['active'] %}checked{% endif %} />
+        </div>
+      </div>
+      <button type="submit">Save Changes</button>
+    </form>
+  </div>
+{% endblock %}

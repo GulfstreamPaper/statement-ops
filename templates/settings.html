@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>SMTP Settings</h2>
+    <form method="post" enctype="multipart/form-data">
+      <div class="row">
+        <div>
+          <label>SMTP Host</label>
+          <input name="smtp_host" value="{{ settings['smtp_host'] }}" />
+        </div>
+        <div>
+          <label>SMTP Port</label>
+          <input name="smtp_port" value="{{ settings['smtp_port'] or '587' }}" />
+        </div>
+        <div>
+          <label>SMTP Username</label>
+          <input name="smtp_user" value="{{ settings['smtp_user'] }}" />
+        </div>
+        <div>
+          <label>SMTP Password</label>
+          <input name="smtp_pass" type="password" value="{{ settings['smtp_pass'] }}" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>From Address</label>
+          <input name="smtp_from" value="{{ settings['smtp_from'] }}" />
+        </div>
+        <div>
+          <label>Use TLS</label>
+          <input name="smtp_tls" type="checkbox" {% if settings['smtp_tls'] != 'false' %}checked{% endif %} />
+        </div>
+      </div>
+
+      <h2>Company Info</h2>
+      <div class="row">
+        <div>
+          <label>Company Name</label>
+          <input name="company_name" value="{{ settings['company_name'] }}" />
+        </div>
+        <div>
+          <label>Statement Subtitle</label>
+          <input name="company_subtitle" value="{{ settings['company_subtitle'] }}" />
+        </div>
+        <div>
+          <label>Address</label>
+          <input name="company_address" value="{{ settings['company_address'] }}" />
+        </div>
+        <div>
+          <label>Phone</label>
+          <input name="company_phone" value="{{ settings['company_phone'] }}" />
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Company Email</label>
+          <input name="company_email" value="{{ settings['company_email'] }}" />
+        </div>
+        <div>
+          <label>Upload Logo (optional)</label>
+          <input name="logo_file" type="file" accept=".png,.jpg,.jpeg,.gif" />
+          {% if settings['logo_path'] %}
+            <small>Current: {{ settings['logo_path'].split('/')[-1].split('\\\\')[-1] }}</small>
+          {% endif %}
+        </div>
+      </div>
+
+      <h2>Invoice Source</h2>
+      <div class="row">
+        <div>
+          <label>Source</label>
+          <select name="invoice_source">
+            <option value="latest_upload" {% if settings['invoice_source'] != 'path' %}selected{% endif %}>Latest Upload</option>
+            <option value="path" {% if settings['invoice_source'] == 'path' %}selected{% endif %}>Fixed Path</option>
+          </select>
+        </div>
+        <div>
+          <label>Invoice Path (if fixed)</label>
+          <input name="invoice_path" value="{{ settings['invoice_path'] }}" />
+        </div>
+      </div>
+
+      <button type="submit">Save Settings</button>
+    </form>
+  </div>
+{% endblock %}

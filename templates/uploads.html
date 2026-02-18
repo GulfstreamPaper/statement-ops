@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Upload Invoice File</h2>
+    <form method="post" enctype="multipart/form-data">
+      <div class="row">
+        <div>
+          <label>Excel File (.xlsx)</label>
+          <input type="file" name="invoice_file" accept=".xlsx" required />
+        </div>
+      </div>
+      <button type="submit">Upload</button>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Recent Uploads</h2>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Filename</th>
+          <th>Uploaded At</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in files %}
+          <tr>
+            <td>{{ f['filename'] }}</td>
+            <td>{{ f['uploaded_at'] }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="2">No uploads yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endblock %}
