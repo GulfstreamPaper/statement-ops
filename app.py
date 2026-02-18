@@ -53,6 +53,13 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 APP_USERNAME = os.environ.get("APP_USERNAME", "").strip()
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
 
+
+def ensure_storage():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    os.makedirs(LOGO_DIR, exist_ok=True)
+    os.makedirs(OUT_DIR, exist_ok=True)
+
 EMAIL_SIGNATURE_TEXT = """--
 [logo insert here]
 Redway Group Inc
@@ -247,6 +254,10 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+
+ensure_storage()
+init_db()
 
 
 def get_setting(key, default=""):
