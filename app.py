@@ -1704,6 +1704,7 @@ def index():
 
 @app.route("/overdue-report")
 def overdue_report():
+    today = date.today()
     run = get_latest_overdue_run()
 
     rows = get_overdue_items(run["id"]) if run and run["status"] == "success" else []
