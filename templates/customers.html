@@ -6,6 +6,7 @@
       <button class="tab active" type="button" data-tab="tab-new">New</button>
       <button class="tab" type="button" data-tab="tab-groups">Groups</button>
       <button class="tab" type="button" data-tab="tab-all">All</button>
+      <button class="tab" type="button" data-tab="tab-inactive">Inactive</button>
     </div>
   </div>
 
@@ -35,6 +36,7 @@
             <td>{{ name }}</td>
             <td>
               <button type="button" class="secondary" data-new-customer="{{ name }}">Add</button>
+              <button type="button" class="secondary update-existing-btn" data-new-customer="{{ name }}">Update Existing</button>
             </td>
           </tr>
         {% else %}
@@ -158,6 +160,7 @@
             <td>{{ term_labels.get(g['terms_code'], g['terms_code']) }}</td>
             <td>{{ g['frequency'] }}</td>
             <td class="actions">
+              <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=g['id']) }}">Download</a>
               <a class="button-link edit" href="{{ url_for('edit_customer', recipient_id=g['id']) }}">Edit</a>
               <form method="post" action="{{ url_for('delete_customer', recipient_id=g['id']) }}" onsubmit="return confirm('Delete group?')">
                 <button type="submit">Delete</button>
@@ -173,6 +176,7 @@
 
   <div class="panel tab-panel" id="tab-all">
     <h2>All Customers</h2>
+    <p><small>Inactive customers are shown in the Inactive tab.</small></p>
     <div class="row">
       <div>
         <label>Search</label>
@@ -224,6 +228,42 @@
           </tr>
         {% else %}
           <tr><td colspan="7">No customers yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel tab-panel" id="tab-inactive">
+    <h2>Inactive Customers</h2>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Email</th>
+          <th>Terms</th>
+          <th>Frequency</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in inactive_recipients %}
+          <tr>
+            <td>{{ r['group_name'] }}</td>
+            <td>{{ 'Group' if r['recipient_type'] == 'group' else 'Single' }}</td>
+            <td>{{ r['email_to'] }}</td>
+            <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
+            <td>{{ r['frequency'] }}</td>
+            <td class="actions">
+              <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
+              <a class="button-link edit" href="{{ url_for('edit_customer', recipient_id=r['id']) }}">Edit</a>
+              <form method="post" action="{{ url_for('delete_customer', recipient_id=r['id']) }}" onsubmit="return confirm('Delete customer?')">
+                <button type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">No inactive customers.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -286,6 +326,36 @@
         <div class="actions">
           <button type="submit">Save Customer</button>
           <button type="button" class="secondary" id="closeNewCustomer">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="updateExistingModal">
+    <div class="modal-card">
+      <h3>Update Existing Customer</h3>
+      <form method="post">
+        <input type="hidden" name="form_type" value="update_existing" />
+        <input type="hidden" name="new_name" id="updateNewName" />
+        <input type="hidden" name="existing_id" id="updateExistingId" />
+        <p><small>New customer name: <span id="updateNewLabel"></span></small></p>
+        <div class="row">
+          <div>
+            <label>Search</label>
+            <input id="updateExistingSearch" placeholder="Search existing customers" />
+          </div>
+        </div>
+        <div class="picker-list" id="updateExistingList">
+          {% for customer in all_singles %}
+            <div class="picker-item update-existing-item" data-id="{{ customer['id'] }}" data-name="{{ customer['group_name'] }}" data-search="{{ customer['group_name'] | lower }}">
+              {{ customer['group_name'] }}
+            </div>
+          {% endfor %}
+        </div>
+        <p><small>Selected: <span id="updateExistingLabel">None</span></small></p>
+        <div class="actions">
+          <button type="submit">Update</button>
+          <button type="button" class="secondary" id="closeUpdateExisting">Cancel</button>
         </div>
       </form>
     </div>
@@ -405,5 +475,47 @@
       }
     });
     updateGroupSummary();
+
+    const updateExistingModal = document.getElementById('updateExistingModal');
+    const updateNewName = document.getElementById('updateNewName');
+    const updateNewLabel = document.getElementById('updateNewLabel');
+    const updateExistingId = document.getElementById('updateExistingId');
+    const updateExistingLabel = document.getElementById('updateExistingLabel');
+    const updateExistingSearch = document.getElementById('updateExistingSearch');
+    const updateExistingItems = document.querySelectorAll('.update-existing-item');
+    const closeUpdateExisting = document.getElementById('closeUpdateExisting');
+
+    document.querySelectorAll('.update-existing-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const newName = btn.dataset.newCustomer;
+        updateNewName.value = newName;
+        updateNewLabel.textContent = newName;
+        updateExistingId.value = '';
+        updateExistingLabel.textContent = 'None';
+        updateExistingModal.classList.add('active');
+      });
+    });
+
+    updateExistingItems.forEach((item) => {
+      item.addEventListener('click', () => {
+        updateExistingId.value = item.dataset.id;
+        updateExistingLabel.textContent = item.dataset.name;
+      });
+    });
+
+    if (updateExistingSearch) {
+      updateExistingSearch.addEventListener('input', () => {
+        const query = (updateExistingSearch.value || '').toLowerCase();
+        updateExistingItems.forEach((item) => {
+          item.style.display = item.dataset.search.includes(query) ? '' : 'none';
+        });
+      });
+    }
+
+    if (closeUpdateExisting) {
+      closeUpdateExisting.addEventListener('click', () => {
+        updateExistingModal.classList.remove('active');
+      });
+    }
   </script>
 {% endblock %}

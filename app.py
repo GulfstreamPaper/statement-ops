@@ -60,33 +60,13 @@ def ensure_storage():
     os.makedirs(LOGO_DIR, exist_ok=True)
     os.makedirs(OUT_DIR, exist_ok=True)
 
-EMAIL_SIGNATURE_TEXT = """--
-[logo insert here]
-Redway Group Inc
-17020 Five Waters Ave, Boca Raton, FL 33496
-www.redwaygroup.com
-sales@redwaygroup.com
-Tel: (347) 990-9200
-Fax: (718) 504-4495
-
-Statement of Confidentiality
-The contents of this e-mail message and any attachments are confidential and are intended solely for addressee. The information may also be legally privileged. This transmission is sent in trust, for the sole purpose of delivery to the intended recipient. If you have received this transmission in error, any use, reproduction or dissemination of this transmission is strictly prohibited. If you are not the intended recipient, please immediately notify the sender by reply e-mail or phone and delete this message and its attachments, if any.
-"""
-
-EMAIL_SIGNATURE_HTML_TEMPLATE = """<span>-- </span><br>
-<div dir="ltr">
-  <div>{logo_html}</div>
-  <div><b><font size="4" color="#000000">Redway Group Inc</font></b></div>
-  <div><font>17020 Five Waters Ave, Boca Raton, FL 33496</font></div>
-  <div><span style="color:rgb(34,34,34);font-family:Calibri,sans-serif"><a href="http://www.redwaygroup.com" target="_blank" rel="noopener">www.redwaygroup.com</a></span></div>
-  <div><a href="mailto:sales@redwaygroup.com" target="_blank" rel="noopener">sales@redwaygroup.com</a><br></div>
-  <div>Tel: (347) 990-9200</div>
-  <div>Fax: (718) 504-4495</div>
-  <div><div><div style="color:rgb(34,34,34)">
-    <p style="color:rgb(0,0,0);font-size:12.7273px;margin:0in 0in 0.0001pt"><u><font color="#444444">Statement of Confidentiality</font></u></p>
-    <p style="color:rgb(0,0,0);font-size:12.7273px;margin:0in 0in 0.0001pt"><font color="#444444">The contents of this e-mail message and any attachments are confidential and are intended solely for addressee. The information may also be legally privileged. This transmission is sent in trust, for the sole purpose of delivery to the intended recipient. If you have received this transmission in error, any use, reproduction or dissemination of this transmission is strictly prohibited. If you are not the intended recipient, please immediately notify the sender by reply e-mail or phone and delete this message and its attachments, if any.</font></p>
-  </div></div></div>
-</div>"""
+CONFIDENTIALITY_TEXT = (
+    "The contents of this e-mail message and any attachments are confidential and are intended solely for addressee. "
+    "The information may also be legally privileged. This transmission is sent in trust, for the sole purpose of delivery "
+    "to the intended recipient. If you have received this transmission in error, any use, reproduction or dissemination of "
+    "this transmission is strictly prohibited. If you are not the intended recipient, please immediately notify the sender "
+    "by reply e-mail or phone and delete this message and its attachments, if any."
+)
 
 # --- DB helpers ---
 
@@ -436,13 +416,109 @@ def auth_enabled():
 def enforce_login():
     if not auth_enabled():
         return
-    if request.endpoint in {"login", "static"}:
+    if request.endpoint in {"login", "static", "app_logo"}:
         return
     if request.path.startswith("/static"):
         return
     if session.get("logged_in"):
         return
     return redirect(url_for("login", next=request.path))
+
+
+def html_escape(value):
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def normalize_cc(value):
+    if not value:
+        return ""
+    value = str(value).strip()
+    if not value:
+        return ""
+    for sep in [",", ";"]:
+        if sep in value:
+            value = value.split(sep)[0].strip()
+            break
+    return value
+
+
+def get_notice_cc(notice_type):
+    key_map = {
+        "statement": "cc_statement",
+        "overdue": "cc_overdue",
+        "skipped": "cc_skipped",
+        "short_paid": "cc_short_paid",
+    }
+    setting_key = key_map.get(notice_type)
+    if not setting_key:
+        return None
+    return normalize_cc(get_setting(setting_key, "")) or None
+
+
+def build_signature(logo_html):
+    company_name = get_setting("company_name", "").strip()
+    company_address = get_setting("company_address", "").strip()
+    company_phone = get_setting("company_phone", "").strip()
+    company_email = get_setting("company_email", "").strip()
+    company_website = get_setting("company_website", "").strip()
+
+    text_lines = ["--"]
+    if company_name:
+        text_lines.append(company_name)
+    if company_address:
+        text_lines.append(company_address)
+    if company_website:
+        text_lines.append(company_website)
+    if company_email:
+        text_lines.append(company_email)
+    if company_phone:
+        text_lines.append(f"Tel: {company_phone}")
+    text_lines.append("")
+    text_lines.append("Statement of Confidentiality")
+    text_lines.append(CONFIDENTIALITY_TEXT)
+
+    html_parts = [f'<span>-- </span><br><div dir="ltr">']
+    if logo_html:
+        html_parts.append(f"<div>{logo_html}</div>")
+    if company_name:
+        html_parts.append(
+            f'<div><b><font size="4" color="#000000">{html_escape(company_name)}</font></b></div>'
+        )
+    if company_address:
+        html_parts.append(f"<div><font>{html_escape(company_address)}</font></div>")
+    if company_website:
+        website_safe = html_escape(company_website)
+        html_parts.append(
+            f'<div><span style="color:rgb(34,34,34);font-family:Calibri,sans-serif">'
+            f'<a href="{website_safe}" target="_blank" rel="noopener">{website_safe}</a>'
+            f"</span></div>"
+        )
+    if company_email:
+        email_safe = html_escape(company_email)
+        html_parts.append(
+            f'<div><a href="mailto:{email_safe}" target="_blank" rel="noopener">{email_safe}</a><br></div>'
+        )
+    if company_phone:
+        html_parts.append(f"<div>Tel: {html_escape(company_phone)}</div>")
+
+    html_parts.append(
+        '<div><div><div style="color:rgb(34,34,34)">'
+        '<p style="color:rgb(0,0,0);font-size:12.7273px;margin:0in 0in 0.0001pt">'
+        '<u><font color="#444444">Statement of Confidentiality</font></u></p>'
+        f'<p style="color:rgb(0,0,0);font-size:12.7273px;margin:0in 0in 0.0001pt">'
+        f'<font color="#444444">{html_escape(CONFIDENTIALITY_TEXT)}</font></p>'
+        "</div></div></div>"
+    )
+    html_parts.append("</div>")
+
+    signature_text = "\n".join(text_lines).strip()
+    signature_html = "".join(html_parts)
+    return signature_text, signature_html
 
 
 def compute_due_date(ship_date, terms_code):
@@ -683,7 +759,9 @@ def run_overdue_report():
 def get_recipients_terms_map():
     conn = get_db()
     cur = conn.cursor()
-    cur.execute("SELECT id, group_name, terms_code, net_terms, recipient_type FROM recipients")
+    cur.execute(
+        "SELECT id, group_name, terms_code, net_terms, recipient_type FROM recipients WHERE active = 1"
+    )
     rows = cur.fetchall()
     conn.close()
     recipients_map = {}
@@ -701,7 +779,8 @@ def get_single_recipients_map():
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, group_name, terms_code, net_terms FROM recipients WHERE recipient_type = 'single'"
+        "SELECT id, group_name, terms_code, net_terms FROM recipients "
+        "WHERE recipient_type = 'single' AND active = 1"
     )
     rows = cur.fetchall()
     conn.close()
@@ -725,7 +804,7 @@ def get_group_membership_map():
         "FROM group_members gm "
         "JOIN recipients c ON c.id = gm.customer_id "
         "JOIN recipients g ON g.id = gm.group_id "
-        "WHERE g.recipient_type = 'group'"
+        "WHERE g.recipient_type = 'group' AND g.active = 1 AND c.active = 1"
     )
     rows = cur.fetchall()
     conn.close()
@@ -1306,19 +1385,17 @@ def send_email(to_emails, subject, body, attachment_path=None, cc_emails=None, e
     if not host or not sender:
         raise RuntimeError("SMTP settings are incomplete")
 
-    signature_text = EMAIL_SIGNATURE_TEXT.replace("[logo insert here]\n", "")
-    plain_body = f"{body}\n\n{signature_text}".strip()
-
-    html_body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    html_body = html_body.replace("\n", "<br>")
-
     logo_cid = None
     logo_html = ""
     if logo_path and os.path.exists(logo_path):
         logo_cid = make_msgid()[1:-1]
         logo_html = f'<img width="96" height="96" src="cid:{logo_cid}" style="display:block" alt="Logo" />'
 
-    signature_html = EMAIL_SIGNATURE_HTML_TEMPLATE.format(logo_html=logo_html)
+    signature_text, signature_html = build_signature(logo_html)
+    plain_body = f"{body}\n\n{signature_text}".strip()
+
+    html_body = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    html_body = html_body.replace("\n", "<br>")
     html_body = f"{html_body}<br><br>{signature_html}"
 
     msg = EmailMessage()
@@ -1501,7 +1578,7 @@ def get_group_member_names(group_id):
     cur = conn.cursor()
     cur.execute(
         "SELECT r.group_name FROM group_members gm "
-        "JOIN recipients r ON r.id = gm.customer_id WHERE gm.group_id = ?",
+        "JOIN recipients r ON r.id = gm.customer_id WHERE gm.group_id = ? AND r.active = 1",
         (group_id,),
     )
     rows = cur.fetchall()
@@ -1572,7 +1649,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type):
             "Kind regards,\n"
             "Redway Group Inc"
         )
-        send_email(recipient["email_to"], subject, body, output_path)
+        send_email(recipient["email_to"], subject, body, output_path, cc_emails=get_notice_cc("statement"))
 
         conn = get_db()
         cur = conn.cursor()
@@ -1660,6 +1737,21 @@ def login():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+@app.route("/assets/logo")
+def app_logo():
+    logo_path = get_setting("logo_path", "")
+    if logo_path and os.path.exists(logo_path):
+        return send_file(logo_path)
+    return "", 404
+
+
+@app.context_processor
+def inject_app_logo():
+    logo_path = get_setting("logo_path", "")
+    has_logo = bool(logo_path and os.path.exists(logo_path))
+    return {"app_logo_url": url_for("app_logo") if has_logo else ""}
 
 
 @app.route("/")
@@ -1842,7 +1934,7 @@ def overdue_report_send(recipient_id):
             "Kind regards,\n"
             "Redway Group Inc"
         )
-        send_email(recipient["email_to"], subject, body, output_path, cc_emails="sales@redwaygroup.com")
+        send_email(recipient["email_to"], subject, body, output_path, cc_emails=get_notice_cc("overdue"))
         record_notice_send(run_id, invoice_file_id, invoice_path, recipient_id, "overdue")
         flash(f"Overdue notice sent to {recipient['group_name']}.", "success")
     except Exception as exc:
@@ -1918,6 +2010,7 @@ def overdue_report_skipped(recipient_id):
             subject,
             body,
             attachment_path=statement_path,
+            cc_emails=get_notice_cc("skipped"),
             extra_attachments=attachments,
         )
         record_notice_send(run_id, invoice_file_id, invoice_path, recipient_id, "skipped")
@@ -1994,6 +2087,7 @@ def overdue_report_short_paid(recipient_id):
             subject,
             body,
             attachment_path=statement_path,
+            cc_emails=get_notice_cc("short_paid"),
             extra_attachments=attachments,
         )
         record_notice_send(run_id, invoice_file_id, invoice_path, recipient_id, "short_paid")
@@ -2127,6 +2221,39 @@ def customers():
             flash(f"Group {group_name} created.", "success")
             return redirect(url_for("customers"))
 
+        if form_type == "update_existing":
+            new_name = request.form.get("new_name", "").strip()
+            existing_id = parse_int(request.form.get("existing_id"), None)
+            if not new_name or not existing_id:
+                conn.close()
+                flash("Select an existing customer to update.", "error")
+                return redirect(url_for("customers"))
+
+            cur.execute("SELECT * FROM recipients WHERE id = ?", (existing_id,))
+            existing = cur.fetchone()
+            if not existing or existing["recipient_type"] != "single":
+                conn.close()
+                flash("Existing customer not found.", "error")
+                return redirect(url_for("customers"))
+
+            cur.execute(
+                "SELECT id FROM recipients WHERE lower(group_name) = lower(?) AND id != ?",
+                (new_name, existing_id),
+            )
+            if cur.fetchone():
+                conn.close()
+                flash("Another customer already uses that name.", "error")
+                return redirect(url_for("customers"))
+
+            cur.execute(
+                "UPDATE recipients SET group_name = ? WHERE id = ?",
+                (new_name, existing_id),
+            )
+            conn.commit()
+            conn.close()
+            flash("Customer name updated.", "success")
+            return redirect(url_for("customers"))
+
         conn.close()
         flash("Unknown action.", "error")
         return redirect(url_for("customers"))
@@ -2137,11 +2264,15 @@ def customers():
     rows = cur.fetchall()
     conn.close()
 
-    singles = [r for r in rows if r["recipient_type"] == "single"]
-    groups = [r for r in rows if r["recipient_type"] == "group"]
+    singles_all = [r for r in rows if r["recipient_type"] == "single"]
+    groups_all = [r for r in rows if r["recipient_type"] == "group"]
+    active_singles = [r for r in singles_all if r["active"]]
+    inactive_singles = [r for r in singles_all if not r["active"]]
+    active_groups = [r for r in groups_all if r["active"]]
+    inactive_groups = [r for r in groups_all if not r["active"]]
 
     members_by_group = get_group_members_by_group_id()
-    group_name_map = {g["id"]: g["group_name"] for g in groups}
+    group_name_map = {g["id"]: g["group_name"] for g in groups_all}
     group_member_counts = {gid: len(members) for gid, members in members_by_group.items()}
     group_member_names = {
         gid: ", ".join([m["name"] for m in members]) for gid, members in members_by_group.items()
@@ -2165,7 +2296,7 @@ def customers():
             df = load_invoice_df(latest_path)
             names = [normalize_name(name) for name in df["Customer Name"].tolist()]
             unique_names = sorted({name for name in names if name})
-            existing_keys = {name_key(r["group_name"]) for r in singles}
+            existing_keys = {name_key(r["group_name"]) for r in singles_all}
             new_customers = [name for name in unique_names if name_key(name) not in existing_keys]
         except Exception as exc:
             flash(f"Unable to load latest invoice file for new customers: {exc}", "error")
@@ -2174,9 +2305,11 @@ def customers():
     return render_template(
         "customers.html",
         new_customers=new_customers,
-        groups=groups,
-        singles=singles,
-        all_recipients=rows,
+        groups=active_groups,
+        singles=active_singles,
+        all_recipients=active_groups + active_singles,
+        inactive_recipients=inactive_groups + inactive_singles,
+        all_singles=singles_all,
         group_member_counts=group_member_counts,
         group_member_names=group_member_names,
         customer_groups=customer_groups,
@@ -2256,7 +2389,9 @@ def edit_customer(recipient_id):
         return redirect(url_for("customers"))
 
     if recipient["recipient_type"] == "group":
-        cur.execute("SELECT id, group_name FROM recipients WHERE recipient_type = 'single' ORDER BY group_name ASC")
+        cur.execute(
+            "SELECT id, group_name FROM recipients WHERE recipient_type = 'single' AND active = 1 ORDER BY group_name ASC"
+        )
         singles = cur.fetchall()
         conn.close()
         members_by_group = get_group_members_by_group_id()
@@ -2377,15 +2512,6 @@ def send_manual():
             if not recipient:
                 raise RuntimeError("Recipient not found")
 
-            if action == "download":
-                output_path = build_statement_pdf(recipient, invoice_path)
-                return send_file(
-                    output_path,
-                    as_attachment=False,
-                    download_name=os.path.basename(output_path),
-                    mimetype="application/pdf",
-                )
-
             run_for_recipient(recipient, invoice_path, invoice_file_id, "manual")
             flash("Statement sent", "success")
         except Exception as e:
@@ -2394,6 +2520,48 @@ def send_manual():
         return redirect(url_for("send_manual"))
 
     return render_template("send.html", groups=groups, singles=singles, invoice_files=invoice_files)
+
+
+@app.route("/send/download")
+def send_download():
+    recipient_id = request.args.get("recipient_id")
+    invoice_file_id = request.args.get("invoice_file_id")
+    if not recipient_id:
+        return "Recipient is required", 400
+    recipient_id = int(recipient_id)
+    if invoice_file_id:
+        invoice_file_id = int(invoice_file_id)
+
+    try:
+        if invoice_file_id:
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT path FROM invoice_files WHERE id = ?", (invoice_file_id,))
+            row = cur.fetchone()
+            conn.close()
+            if not row:
+                return "Invoice file not found", 404
+            invoice_path = row[0]
+        else:
+            _, invoice_path = get_invoice_for_run()
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM recipients WHERE id = ?", (recipient_id,))
+        recipient = cur.fetchone()
+        conn.close()
+        if not recipient:
+            return "Recipient not found", 404
+
+        output_path = build_statement_pdf(recipient, invoice_path)
+        return send_file(
+            output_path,
+            as_attachment=False,
+            download_name=os.path.basename(output_path),
+            mimetype="application/pdf",
+        )
+    except Exception as exc:
+        return f"Statement download failed: {exc}", 400
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -2411,6 +2579,11 @@ def settings():
             "company_address",
             "company_phone",
             "company_email",
+            "company_website",
+            "cc_statement",
+            "cc_overdue",
+            "cc_skipped",
+            "cc_short_paid",
             "invoice_source",
             "invoice_path",
         ]
@@ -2442,6 +2615,11 @@ def settings():
         "company_address",
         "company_phone",
         "company_email",
+        "company_website",
+        "cc_statement",
+        "cc_overdue",
+        "cc_skipped",
+        "cc_short_paid",
         "logo_path",
         "invoice_source",
         "invoice_path",

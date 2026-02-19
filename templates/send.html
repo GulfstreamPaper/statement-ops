@@ -22,7 +22,7 @@
       </div>
       <div class="actions">
         <button type="submit" name="action" value="send">Send Statement</button>
-        <button type="submit" class="secondary" name="action" value="download" formtarget="_blank">Download Statement</button>
+        <button type="button" class="secondary" id="downloadStatement">Download Statement</button>
       </div>
     </form>
   </div>
@@ -128,5 +128,24 @@
         pickerModal.classList.remove('active');
       });
     });
+
+    const downloadBtn = document.getElementById('downloadStatement');
+    const invoiceSelect = document.querySelector('select[name="invoice_file_id"]');
+    const downloadUrl = "{{ url_for('send_download') }}";
+
+    if (downloadBtn) {
+      downloadBtn.addEventListener('click', () => {
+        if (!selectedId.value) {
+          alert('Please select a customer or group first.');
+          return;
+        }
+        const params = new URLSearchParams();
+        params.set('recipient_id', selectedId.value);
+        if (invoiceSelect && invoiceSelect.value) {
+          params.set('invoice_file_id', invoiceSelect.value);
+        }
+        window.open(`${downloadUrl}?${params.toString()}`, '_blank');
+      });
+    }
   </script>
 {% endblock %}

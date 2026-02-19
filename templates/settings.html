@@ -57,11 +57,35 @@
           <input name="company_email" value="{{ settings['company_email'] }}" />
         </div>
         <div>
+          <label>Company Website</label>
+          <input name="company_website" value="{{ settings['company_website'] }}" />
+        </div>
+        <div>
           <label>Upload Logo (optional)</label>
           <input name="logo_file" type="file" accept=".png,.jpg,.jpeg,.gif" />
           {% if settings['logo_path'] %}
             <small>Current: {{ settings['logo_path'].split('/')[-1].split('\\\\')[-1] }}</small>
           {% endif %}
+        </div>
+      </div>
+
+      <h2>Notice CC Settings</h2>
+      <div class="row">
+        <div>
+          <label>Statement CC</label>
+          <input name="cc_statement" type="email" value="{{ settings['cc_statement'] }}" />
+        </div>
+        <div>
+          <label>Overdue Notice CC</label>
+          <input name="cc_overdue" type="email" value="{{ settings['cc_overdue'] }}" />
+        </div>
+        <div>
+          <label>Skipped Notice CC</label>
+          <input name="cc_skipped" type="email" value="{{ settings['cc_skipped'] }}" />
+        </div>
+        <div>
+          <label>Short Paid Notice CC</label>
+          <input name="cc_short_paid" type="email" value="{{ settings['cc_short_paid'] }}" />
         </div>
       </div>
 

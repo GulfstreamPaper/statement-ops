@@ -20,6 +20,21 @@
         </p>
       </div>
     </div>
+    <div class="row">
+      <div>
+        <label>Search</label>
+        <input id="overdueSearch" placeholder="Search group name" />
+      </div>
+      <div>
+        <label>Terms</label>
+        <select id="overdueTerms">
+          <option value="">All</option>
+          {% for code, label in term_labels.items() %}
+            <option value="{{ code }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
     <table class="table">
       <thead>
         <tr>
@@ -36,7 +51,7 @@
       </thead>
       <tbody>
         {% for row in rows %}
-          <tr>
+          <tr data-search="{{ row['group_name'] | lower }}" data-terms="{{ row['terms_code'] }}">
             <td>{{ row['group_name'] }}</td>
             <td>{{ term_labels.get(row['terms_code'], row['terms_code']) }}</td>
             <td>{{ row['overdue_count'] }}</td>
@@ -259,5 +274,23 @@
         shortPaidFiles.innerHTML = '';
       }
     });
+
+    const overdueSearch = document.getElementById('overdueSearch');
+    const overdueTerms = document.getElementById('overdueTerms');
+    const overdueRows = document.querySelectorAll('table.table tbody tr[data-search]');
+
+    function filterOverdue() {
+      const query = (overdueSearch.value || '').toLowerCase();
+      const terms = overdueTerms.value;
+      overdueRows.forEach((row) => {
+        const matchesText = row.dataset.search.includes(query);
+        const matchesTerms = !terms || row.dataset.terms === terms;
+        row.style.display = matchesText && matchesTerms ? '' : 'none';
+      });
+    }
+
+    overdueSearch.addEventListener('input', filterOverdue);
+    overdueTerms.addEventListener('change', filterOverdue);
+    filterOverdue();
   </script>
 {% endblock %}
