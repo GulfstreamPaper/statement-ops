@@ -24,6 +24,18 @@ header {
   color: #fef7ef;
 }
 
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.app-logo {
+  height: 32px;
+  width: auto;
+  display: block;
+}
+
 header h1 {
   margin: 0;
   font-size: 22px;

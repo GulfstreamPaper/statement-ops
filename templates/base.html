@@ -8,7 +8,12 @@
 </head>
 <body>
   <header>
-    <h1>Statement Ops Console</h1>
+    <div class="brand">
+      {% if app_logo_url %}
+        <img src="{{ app_logo_url }}" alt="Company logo" class="app-logo" />
+      {% endif %}
+      <h1>Statement Ops Console</h1>
+    </div>
     <nav>
       <a href="{{ url_for('index') }}">Dashboard</a>
       <a href="{{ url_for('customers') }}">Customers</a>
