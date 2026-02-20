@@ -49,6 +49,35 @@ TERM_DAYS = {
 }
 TERM_LABEL_TO_CODE = {label.lower(): code for code, label in TERM_OPTIONS}
 TERM_CODE_TO_LABEL = {code: label for code, label in TERM_OPTIONS}
+EMAIL_TEMPLATE_DEFAULTS = {
+    "statement": (
+        "Dear Customer,\n\n"
+        "Attached please find the most recent statement of open invoices.\n\n"
+        "Please let us know if you have any questions.\n\n"
+        "Kind regards,\n"
+        "Redway Group Inc"
+    ),
+    "overdue": (
+        "Good afternoon Team,\n\n"
+        "Attached please find the most recent statement of open invoices. Please update us on the status of payments for all highlighted invoices.\n\n"
+        "Let me know if you have any questions or need additional information.\n\n"
+        "Kind regards,\n"
+        "Redway Group Inc"
+    ),
+    "skipped": (
+        "Dear Customer,\n\n"
+        "It seems that one or more invoices have been skipped with your last payment. Attached please find the copies of the invoices along with a most recent statement for the account.\n\n"
+        "Please let us know if you have any questions.\n\n"
+        "Kind Regards,\n"
+        "Redway Group Team"
+    ),
+    "short_paid": (
+        "Dear Customer,\n\n"
+        "Attached is a copy of the invoice that appears to have been partially paid. Could you please double check your records. Thanks in advance!\n\n"
+        "Kind regards,\n"
+        "Redway Group Team"
+    ),
+}
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
@@ -627,6 +656,12 @@ def get_notice_cc(notice_type):
     if not setting_key:
         return None
     return normalize_cc(get_setting(setting_key, "")) or None
+
+
+def get_email_template_body(template_key):
+    default = EMAIL_TEMPLATE_DEFAULTS.get(template_key, "")
+    setting_key = f"email_template_{template_key}"
+    return get_setting(setting_key, default)
 
 
 def build_signature(logo_html):
@@ -1589,12 +1624,13 @@ def compute_overdue_report(invoice_path):
                         }
                     )
 
-        if not overdue_items:
-            continue
         overdue_count = len(overdue_items)
         overdue_amount = sum(i["outstanding"] for i in overdue_items)
-        oldest_due_date = min(i["due_date"] for i in overdue_items)
-        days_overdue = (today - oldest_due_date).days
+        if overdue_items:
+            oldest_due_date = min(i["due_date"] for i in overdue_items)
+            days_overdue = (today - oldest_due_date).days
+        else:
+            days_overdue = 0
 
         skipped_list = []
         short_paid_list = []
@@ -1630,6 +1666,9 @@ def compute_overdue_report(invoice_path):
                             "location": location,
                         }
                     )
+
+        if overdue_count == 0 and len(skipped_list) == 0 and short_paid_count == 0:
+            continue
 
         report.append(
             {
@@ -2858,13 +2897,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type, preloa
             raise RuntimeError("No outstanding invoices to include")
 
         subject = f"Statement of Open Invoices {date.today().strftime('%m/%d/%Y')}"
-        body = (
-            "Dear Customer,\n\n"
-            "Attached please find the most recent statement of open invoices.\n\n"
-            "Please let us know if you have any questions.\n\n"
-            "Kind regards,\n"
-            "Redway Group Inc"
-        )
+        body = get_email_template_body("statement")
         recipient_email = normalize_email_value(recipient["email_to"])
         if not recipient_email:
             raise RuntimeError("Missing recipient email")
@@ -3201,13 +3234,7 @@ def overdue_report_send(recipient_id):
 
         output_path = build_statement_pdf(recipient, invoice_path)
         subject = f"Overdue Notice {date.today().strftime('%m/%d/%Y')}"
-        body = (
-            "Good afternoon Team,\n\n"
-            "Attached please find the most recent statement of open invoices. Please update us on the status of payments for all highlighted invoices.\n\n"
-            "Let me know if you have any questions or need additional information.\n\n"
-            "Kind regards,\n"
-            "Redway Group Inc"
-        )
+        body = get_email_template_body("overdue")
         send_email(recipient["email_to"], subject, body, output_path, cc_emails=get_notice_cc("overdue"))
         record_notice_send(run_id, invoice_file_id, invoice_path, recipient_id, "overdue")
         flash(f"Overdue notice sent to {recipient['group_name']}.", "success")
@@ -3274,13 +3301,7 @@ def overdue_report_skipped(recipient_id):
 
         statement_path = build_statement_pdf(recipient, invoice_path)
         subject = f"Skipped Invoice Notifcation {date.today().strftime('%m/%d/%Y')}"
-        body = (
-            "Dear Customer,\n\n"
-            "It seems that one or more invoices have been skipped with your last payment. Attached please find the copies of the invoices along with a most recent statement for the account.\n\n"
-            "Please let us know if you have any questions.\n\n"
-            "Kind Regards,\n"
-            "Redway Group Team"
-        )
+        body = get_email_template_body("skipped")
         send_email(
             recipient["email_to"],
             subject,
@@ -3354,12 +3375,7 @@ def overdue_report_short_paid(recipient_id):
 
         statement_path = build_statement_pdf(recipient, invoice_path)
         subject = f"Partial Payment Notification {date.today().strftime('%m/%d/%Y')}"
-        body = (
-            "Dear Customer,\n\n"
-            "Attached is a copy of the invoice that appears to have been partially paid. Could you please double check your records. Thanks in advance!\n\n"
-            "Kind regards,\n"
-            "Redway Group Team"
-        )
+        body = get_email_template_body("short_paid")
         send_email(
             recipient["email_to"],
             subject,
@@ -3970,7 +3986,19 @@ def send_download():
 
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
+    template_keys = ["statement", "overdue", "skipped", "short_paid"]
+    allowed_tabs = {"general", "templates"}
     if request.method == "POST":
+        form_type = request.form.get("form_type", "general")
+        if form_type == "email_templates":
+            for template_key in template_keys:
+                setting_key = f"email_template_{template_key}"
+                value = request.form.get(setting_key, EMAIL_TEMPLATE_DEFAULTS.get(template_key, ""))
+                value = value.replace("\r\n", "\n")
+                set_setting(setting_key, value)
+            flash("Email templates saved.", "success")
+            return redirect(url_for("settings", tab="templates"))
+
         fields = [
             "smtp_host",
             "smtp_port",
@@ -4010,7 +4038,7 @@ def settings():
             except Exception as exc:
                 flash(f"Logo upload failed: {exc}", "error")
         flash("Settings saved", "success")
-        return redirect(url_for("settings"))
+        return redirect(url_for("settings", tab="general"))
 
     settings_data = {key: get_setting(key, "") for key in [
         "smtp_host",
@@ -4038,7 +4066,16 @@ def settings():
         "invoice_source",
         "invoice_path",
     ]}
-    return render_template("settings.html", settings=settings_data)
+    email_templates = {key: get_email_template_body(key) for key in template_keys}
+    active_tab = request.args.get("tab", "general")
+    if active_tab not in allowed_tabs:
+        active_tab = "general"
+    return render_template(
+        "settings.html",
+        settings=settings_data,
+        email_templates=email_templates,
+        active_tab=active_tab,
+    )
 
 
 @app.route("/run-scheduled", methods=["POST"])

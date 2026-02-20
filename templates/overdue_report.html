@@ -63,11 +63,13 @@
             <td class="actions">
               {% if row['recipient_id'] %}
                 <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=row['recipient_id']) }}">Download</a>
-                <form method="post" action="{{ url_for('overdue_report_send', recipient_id=row['recipient_id']) }}" class="overdue-form" data-recipient-id="{{ row['recipient_id'] }}" data-has-email="{{ '1' if row['has_email'] else '0' }}" data-group-name="{{ row['group_name'] }}">
-                  <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
-                  <input type="hidden" name="email_to" class="email-override-input" value="" />
-                  <button type="submit" class="warning {% if row['sent_overdue'] %}sent{% endif %}">Overdue</button>
-                </form>
+                {% if row['overdue_count'] > 0 %}
+                  <form method="post" action="{{ url_for('overdue_report_send', recipient_id=row['recipient_id']) }}" class="overdue-form" data-recipient-id="{{ row['recipient_id'] }}" data-has-email="{{ '1' if row['has_email'] else '0' }}" data-group-name="{{ row['group_name'] }}">
+                    <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
+                    <input type="hidden" name="email_to" class="email-override-input" value="" />
+                    <button type="submit" class="warning {% if row['sent_overdue'] %}sent{% endif %}">Overdue</button>
+                  </form>
+                {% endif %}
                 {% if row['skipped_count'] > 0 %}
                   <button type="button" class="skipped skipped-btn {% if row['sent_skipped'] %}sent{% endif %}"
                           data-recipient-id="{{ row['recipient_id'] }}"
@@ -94,7 +96,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="9">No overdue groups found.</td></tr>
+          <tr><td colspan="9">No overdue, skipped, or short-paid groups found.</td></tr>
         {% endfor %}
       </tbody>
       <tfoot>

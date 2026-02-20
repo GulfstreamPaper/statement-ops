@@ -1,8 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
   <div class="panel">
+    <h2>Settings</h2>
+    <div class="tabs">
+      <button class="tab {% if active_tab != 'templates' %}active{% endif %}" type="button" data-tab="tab-settings-general">General</button>
+      <button class="tab {% if active_tab == 'templates' %}active{% endif %}" type="button" data-tab="tab-settings-templates">Email Templates</button>
+    </div>
+  </div>
+
+  <div class="panel tab-panel {% if active_tab != 'templates' %}active{% endif %}" id="tab-settings-general">
     <h2>SMTP Settings</h2>
     <form method="post" enctype="multipart/form-data">
+      <input type="hidden" name="form_type" value="general" />
       <div class="row">
         <div>
           <label>SMTP Host</label>
@@ -131,4 +140,53 @@
       <button type="submit">Save Settings</button>
     </form>
   </div>
+
+  <div class="panel tab-panel {% if active_tab == 'templates' %}active{% endif %}" id="tab-settings-templates">
+    <h2>Email Templates</h2>
+    <p><small>You can edit email body text only. Subjects remain fixed (with date appended where applicable).</small></p>
+    <form method="post">
+      <input type="hidden" name="form_type" value="email_templates" />
+      <div class="row">
+        <div>
+          <label>Statement Body</label>
+          <textarea name="email_template_statement" rows="8">{{ email_templates['statement'] }}</textarea>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Overdue Notice Body</label>
+          <textarea name="email_template_overdue" rows="8">{{ email_templates['overdue'] }}</textarea>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Skipped Notice Body</label>
+          <textarea name="email_template_skipped" rows="8">{{ email_templates['skipped'] }}</textarea>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Short Paid Notice Body</label>
+          <textarea name="email_template_short_paid" rows="8">{{ email_templates['short_paid'] }}</textarea>
+        </div>
+      </div>
+      <button type="submit">Save Templates</button>
+    </form>
+  </div>
+
+  <script>
+    const tabs = document.querySelectorAll('.tab');
+    const panels = document.querySelectorAll('.tab-panel');
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        tabs.forEach((btn) => btn.classList.remove('active'));
+        panels.forEach((panel) => panel.classList.remove('active'));
+        tab.classList.add('active');
+        const target = document.getElementById(tab.dataset.tab);
+        if (target) {
+          target.classList.add('active');
+        }
+      });
+    });
+  </script>
 {% endblock %}
