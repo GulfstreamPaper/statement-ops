@@ -1459,10 +1459,8 @@ def compute_overdue_report(invoice_path):
                 continue
             group_name = single_entry["group_name"]
             terms_code = single_entry["terms_code"]
-            location = row.get("Location")
-            if location is None or (isinstance(location, float) and pd.isna(location)) or str(location).strip() == "":
-                location = customer_name
-            location = str(location).strip()
+            # Singles (including merged aliases) should stay under one location bucket.
+            location = group_name
         ship_date = parse_ship_date(row.get("Shipping Date"))
         order_id = row.get("Order ID")
         try:
@@ -2394,10 +2392,8 @@ def build_recipient_df(recipient, df):
         customer_df = df[df["_customer_key"].isin(recipient_keys)].copy()
         if customer_df.empty:
             raise RuntimeError("No invoice rows matched this recipient")
-        if "Location" in customer_df.columns:
-            customer_df["Location"] = customer_df["Location"].fillna(customer_df["Customer Name"])
-        else:
-            customer_df["Location"] = customer_df["Customer Name"]
+        # Singles (including merged aliases) should render as a single location block.
+        customer_df["Location"] = recipient["group_name"]
 
     customer_df["Customer Group"] = recipient["group_name"]
     customer_df = customer_df.drop(columns=["_customer_key"])

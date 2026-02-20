@@ -336,6 +336,33 @@ main {
   font-weight: 600;
 }
 
+.table th.sortable {
+  cursor: pointer;
+  user-select: none;
+  position: relative;
+  padding-right: 20px;
+}
+
+.table th.sortable::after {
+  content: "\2195";
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  color: #7b868c;
+}
+
+.table th.sortable.asc::after {
+  content: "\2191";
+  color: #2c3e50;
+}
+
+.table th.sortable.desc::after {
+  content: "\2193";
+  color: #2c3e50;
+}
+
 .badge {
   display: inline-block;
   padding: 2px 8px;

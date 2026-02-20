@@ -38,14 +38,14 @@
     <table class="table">
       <thead>
         <tr>
-          <th>Group</th>
-          <th>Terms</th>
-          <th>Overdue Invoices</th>
-          <th>Oldest Overdue (days)</th>
-          <th>Overdue Amount</th>
-          <th>Short Paid</th>
-          <th>Short Paid Amount</th>
-          <th>Skipped</th>
+          <th class="sortable" data-sort-key="group_name">Group</th>
+          <th class="sortable" data-sort-key="terms">Terms</th>
+          <th class="sortable" data-sort-key="overdue_count">Overdue Invoices</th>
+          <th class="sortable" data-sort-key="days_overdue">Oldest Overdue (days)</th>
+          <th class="sortable" data-sort-key="overdue_amount">Overdue Amount</th>
+          <th class="sortable" data-sort-key="short_paid_count">Short Paid</th>
+          <th class="sortable" data-sort-key="short_paid_amount">Short Paid Amount</th>
+          <th class="sortable" data-sort-key="skipped_count">Skipped</th>
           <th>Actions</th>
         </tr>
       </thead>
@@ -410,20 +410,100 @@
 
     const overdueSearch = document.getElementById('overdueSearch');
     const overdueTerms = document.getElementById('overdueTerms');
-    const overdueRows = document.querySelectorAll('table.table tbody tr[data-search]');
+    const overdueTable = document.querySelector('table.table');
+    const overdueTbody = overdueTable.querySelector('tbody');
+    const sortableHeaders = overdueTable.querySelectorAll('th.sortable');
+    let sortKey = '';
+    let sortDirection = 'asc';
+
+    function getOverdueRows() {
+      return Array.from(overdueTbody.querySelectorAll('tr[data-search]'));
+    }
+
+    function parseNumber(value) {
+      const parsed = Number(String(value || '').replace(/[^0-9.-]/g, ''));
+      return Number.isFinite(parsed) ? parsed : 0;
+    }
+
+    function getSortValue(row, key) {
+      const cells = row.cells;
+      if (key === 'group_name') return (cells[0]?.textContent || '').trim().toLowerCase();
+      if (key === 'terms') return (cells[1]?.textContent || '').trim().toLowerCase();
+      if (key === 'overdue_count') return parseNumber(cells[2]?.textContent);
+      if (key === 'days_overdue') return parseNumber(cells[3]?.textContent);
+      if (key === 'overdue_amount') return parseNumber(cells[4]?.textContent);
+      if (key === 'short_paid_count') return parseNumber(cells[5]?.textContent);
+      if (key === 'short_paid_amount') return parseNumber(cells[6]?.textContent);
+      if (key === 'skipped_count') return parseNumber(cells[7]?.textContent);
+      return '';
+    }
+
+    function applyOverdueSort() {
+      if (!sortKey) {
+        return;
+      }
+      const rows = getOverdueRows();
+      rows.sort((a, b) => {
+        const aValue = getSortValue(a, sortKey);
+        const bValue = getSortValue(b, sortKey);
+
+        let base = 0;
+        if (typeof aValue === 'number' && typeof bValue === 'number') {
+          base = aValue - bValue;
+        } else {
+          base = String(aValue).localeCompare(String(bValue), undefined, { sensitivity: 'base' });
+        }
+        return sortDirection === 'asc' ? base : -base;
+      });
+      rows.forEach((row) => overdueTbody.appendChild(row));
+    }
+
+    function refreshSortIndicators() {
+      sortableHeaders.forEach((header) => {
+        const key = header.dataset.sortKey || '';
+        header.classList.remove('asc', 'desc');
+        header.removeAttribute('aria-sort');
+        if (key === sortKey) {
+          header.classList.add(sortDirection);
+          header.setAttribute('aria-sort', sortDirection === 'asc' ? 'ascending' : 'descending');
+        }
+      });
+    }
 
     function filterOverdue() {
       const query = (overdueSearch.value || '').toLowerCase();
       const terms = overdueTerms.value;
-      overdueRows.forEach((row) => {
+      getOverdueRows().forEach((row) => {
         const matchesText = row.dataset.search.includes(query);
         const matchesTerms = !terms || row.dataset.terms === terms;
         row.style.display = matchesText && matchesTerms ? '' : 'none';
       });
     }
 
+    sortableHeaders.forEach((header) => {
+      header.addEventListener('click', () => {
+        const clickedKey = header.dataset.sortKey || '';
+        if (!clickedKey) {
+          return;
+        }
+        if (sortKey === clickedKey) {
+          sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+        } else {
+          sortKey = clickedKey;
+          sortDirection = 'asc';
+        }
+        applyOverdueSort();
+        filterOverdue();
+        refreshSortIndicators();
+      });
+    });
+
     overdueSearch.addEventListener('input', filterOverdue);
     overdueTerms.addEventListener('change', filterOverdue);
+    sortKey = 'overdue_amount';
+    sortDirection = 'desc';
+    applyOverdueSort();
+    refreshSortIndicators();
     filterOverdue();
   </script>
 {% endblock %}
