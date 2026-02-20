@@ -63,14 +63,17 @@
             <td class="actions">
               {% if row['recipient_id'] %}
                 <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=row['recipient_id']) }}">Download</a>
-                <form method="post" action="{{ url_for('overdue_report_send', recipient_id=row['recipient_id']) }}">
+                <form method="post" action="{{ url_for('overdue_report_send', recipient_id=row['recipient_id']) }}" class="overdue-form" data-recipient-id="{{ row['recipient_id'] }}" data-has-email="{{ '1' if row['has_email'] else '0' }}" data-group-name="{{ row['group_name'] }}">
                   <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
+                  <input type="hidden" name="email_to" class="email-override-input" value="" />
                   <button type="submit" class="warning {% if row['sent_overdue'] %}sent{% endif %}">Overdue</button>
                 </form>
                 {% if row['skipped_count'] > 0 %}
                   <button type="button" class="skipped skipped-btn {% if row['sent_skipped'] %}sent{% endif %}"
                           data-recipient-id="{{ row['recipient_id'] }}"
                           data-run-id="{{ run['id'] if run else '' }}"
+                          data-has-email="{{ '1' if row['has_email'] else '0' }}"
+                          data-group-name="{{ row['group_name'] }}"
                           data-skipped='{{ row["skipped_invoices"] | tojson }}'>
                     Skipped
                   </button>
@@ -79,6 +82,8 @@
                   <button type="button" class="short-paid short-paid-btn {% if row['sent_short_paid'] %}sent{% endif %}"
                           data-recipient-id="{{ row['recipient_id'] }}"
                           data-run-id="{{ run['id'] if run else '' }}"
+                          data-has-email="{{ '1' if row['has_email'] else '0' }}"
+                          data-group-name="{{ row['group_name'] }}"
                           data-short-paid='{{ row["short_paid_invoices"] | tojson }}'>
                     Short Paid
                   </button>
@@ -113,6 +118,7 @@
       <h3>Send Skipped Notice</h3>
       <form id="skippedForm" method="post" enctype="multipart/form-data">
         <input type="hidden" name="run_id" id="skippedRunId" value="" />
+        <input type="hidden" name="email_to" id="skippedEmailTo" value="" />
         <div id="skippedFiles"></div>
         <div class="actions">
           <button type="submit" class="skipped">Send Skipped Notice</button>
@@ -127,12 +133,30 @@
       <h3>Send Short Paid Notice</h3>
       <form id="shortPaidForm" method="post" enctype="multipart/form-data">
         <input type="hidden" name="run_id" id="shortPaidRunId" value="" />
+        <input type="hidden" name="email_to" id="shortPaidEmailTo" value="" />
         <div id="shortPaidFiles"></div>
         <div class="actions">
           <button type="submit" class="short-paid">Send Short Paid Notice</button>
           <button type="button" class="secondary" id="shortPaidCancel">Cancel</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <div id="missingEmailModal" class="modal">
+    <div class="modal-card">
+      <h3>Add Email To Continue</h3>
+      <p><small id="missingEmailLabel"></small></p>
+      <div class="row">
+        <div>
+          <label>Emails (comma separated)</label>
+          <input id="missingEmailInput" placeholder="name@company.com, team@company.com" />
+        </div>
+      </div>
+      <div class="actions">
+        <button type="button" id="missingEmailSave">Save & Continue</button>
+        <button type="button" class="secondary" id="missingEmailCancel">Cancel</button>
+      </div>
     </div>
   </div>
 
@@ -147,7 +171,44 @@
     const shortPaidForm = document.getElementById('shortPaidForm');
     const shortPaidFiles = document.getElementById('shortPaidFiles');
     const shortPaidRunId = document.getElementById('shortPaidRunId');
+    const skippedEmailTo = document.getElementById('skippedEmailTo');
+    const shortPaidEmailTo = document.getElementById('shortPaidEmailTo');
     const shortPaidCancel = document.getElementById('shortPaidCancel');
+
+    const missingEmailModal = document.getElementById('missingEmailModal');
+    const missingEmailLabel = document.getElementById('missingEmailLabel');
+    const missingEmailInput = document.getElementById('missingEmailInput');
+    const missingEmailSave = document.getElementById('missingEmailSave');
+    const missingEmailCancel = document.getElementById('missingEmailCancel');
+
+    let onMissingEmailContinue = null;
+
+    function closeMissingEmailModal() {
+      missingEmailModal.classList.remove('active');
+      missingEmailInput.value = '';
+      onMissingEmailContinue = null;
+    }
+
+    async function persistRecipientEmail(recipientId, emailValue) {
+      const payload = new URLSearchParams();
+      payload.set('email_to', emailValue);
+      const response = await fetch(`/customers/${recipientId}/emails`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: payload.toString(),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || 'Unable to save email.');
+      }
+    }
+
+    function openMissingEmailModal(recipientId, groupName, callback) {
+      onMissingEmailContinue = { recipientId, callback };
+      missingEmailLabel.textContent = `Recipient: ${groupName || 'Selected customer'}`;
+      missingEmailInput.value = '';
+      missingEmailModal.classList.add('active');
+    }
 
     function openSkippedModal(button) {
       const recipientId = button.dataset.recipientId;
@@ -239,18 +300,57 @@
       shortPaidModal.classList.add('active');
     }
 
+    function withRecipientEmail(button, callback) {
+      if (button.dataset.hasEmail === '1') {
+        callback('');
+        return;
+      }
+      openMissingEmailModal(button.dataset.recipientId, button.dataset.groupName, (emailValue) => {
+        button.dataset.hasEmail = '1';
+        callback(emailValue);
+      });
+    }
+
+    document.querySelectorAll('.overdue-form').forEach((form) => {
+      form.addEventListener('submit', (event) => {
+        if (form.dataset.hasEmail === '1') {
+          return;
+        }
+        event.preventDefault();
+        openMissingEmailModal(form.dataset.recipientId, form.dataset.groupName, (emailValue) => {
+          form.dataset.hasEmail = '1';
+          const input = form.querySelector('.email-override-input');
+          if (input) {
+            input.value = emailValue;
+          }
+          form.submit();
+        });
+      });
+    });
+
     document.querySelectorAll('.skipped-btn').forEach((btn) => {
-      btn.addEventListener('click', () => openSkippedModal(btn));
+      btn.addEventListener('click', () => {
+        withRecipientEmail(btn, (emailValue) => {
+          skippedEmailTo.value = emailValue || '';
+          openSkippedModal(btn);
+        });
+      });
     });
 
     document.querySelectorAll('.short-paid-btn').forEach((btn) => {
-      btn.addEventListener('click', () => openShortPaidModal(btn));
+      btn.addEventListener('click', () => {
+        withRecipientEmail(btn, (emailValue) => {
+          shortPaidEmailTo.value = emailValue || '';
+          openShortPaidModal(btn);
+        });
+      });
     });
 
     skippedCancel.addEventListener('click', () => {
       skippedModal.classList.remove('active');
       skippedForm.action = '';
       skippedFiles.innerHTML = '';
+      skippedEmailTo.value = '';
     });
 
     skippedModal.addEventListener('click', (event) => {
@@ -258,6 +358,7 @@
         skippedModal.classList.remove('active');
         skippedForm.action = '';
         skippedFiles.innerHTML = '';
+        skippedEmailTo.value = '';
       }
     });
 
@@ -265,6 +366,7 @@
       shortPaidModal.classList.remove('active');
       shortPaidForm.action = '';
       shortPaidFiles.innerHTML = '';
+      shortPaidEmailTo.value = '';
     });
 
     shortPaidModal.addEventListener('click', (event) => {
@@ -272,6 +374,37 @@
         shortPaidModal.classList.remove('active');
         shortPaidForm.action = '';
         shortPaidFiles.innerHTML = '';
+        shortPaidEmailTo.value = '';
+      }
+    });
+
+    missingEmailSave.addEventListener('click', async () => {
+      const value = (missingEmailInput.value || '').trim();
+      if (!value) {
+        alert('Please add one or more email addresses.');
+        return;
+      }
+      const payload = onMissingEmailContinue;
+      if (!payload || !payload.recipientId || !payload.callback) {
+        closeMissingEmailModal();
+        return;
+      }
+      missingEmailSave.disabled = true;
+      try {
+        await persistRecipientEmail(payload.recipientId, value);
+        closeMissingEmailModal();
+        payload.callback(value);
+      } catch (err) {
+        alert(err.message || 'Unable to save email.');
+      } finally {
+        missingEmailSave.disabled = false;
+      }
+    });
+
+    missingEmailCancel.addEventListener('click', closeMissingEmailModal);
+    missingEmailModal.addEventListener('click', (event) => {
+      if (event.target === missingEmailModal) {
+        closeMissingEmailModal();
       }
     });
 

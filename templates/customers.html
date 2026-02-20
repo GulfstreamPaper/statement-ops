@@ -19,6 +19,17 @@
     {% endif %}
     <div class="row">
       <div>
+        <p><small>Bulk Update (Excel): Customer Name, Terms, Email, Frequency, Day of Week, Day of Month.</small></p>
+        <p><a class="button-link" href="{{ url_for('customers_bulk_template') }}">Download Bulk Template</a></p>
+        <form method="post" enctype="multipart/form-data" class="inline-upload">
+          <input type="hidden" name="form_type" value="bulk_update" />
+          <input type="file" name="bulk_file" accept=".xlsx,.xls,.csv" required />
+          <button type="submit" class="secondary">Upload Bulk Update</button>
+        </form>
+      </div>
+    </div>
+    <div class="row">
+      <div>
         <label>Search</label>
         <input id="newCustomerSearch" placeholder="Search customer name" />
       </div>
@@ -35,8 +46,10 @@
           <tr data-search="{{ name | lower }}">
             <td>{{ name }}</td>
             <td>
-              <button type="button" class="secondary" data-new-customer="{{ name }}">Add</button>
-              <button type="button" class="secondary update-existing-btn" data-new-customer="{{ name }}">Update Existing</button>
+              <div class="new-actions">
+                <button type="button" class="secondary add-new-btn" data-new-customer="{{ name }}">Add</button>
+                <button type="button" class="update-existing-btn" data-new-customer="{{ name }}">Update Existing</button>
+              </div>
             </td>
           </tr>
         {% else %}
@@ -57,7 +70,7 @@
         </div>
         <div>
           <label>Emails (comma separated)</label>
-          <input name="email_to" required />
+          <input name="email_to" />
         </div>
         <div>
           <label>Terms</label>
@@ -281,7 +294,7 @@
           </div>
           <div>
             <label>Emails (comma separated)</label>
-            <input name="email_to" required />
+            <input name="email_to" />
           </div>
           <div>
             <label>Terms</label>
@@ -421,7 +434,7 @@
 
     const newModal = document.getElementById('newCustomerModal');
     const newCustomerName = document.getElementById('newCustomerName');
-    document.querySelectorAll('[data-new-customer]').forEach((btn) => {
+    document.querySelectorAll('.add-new-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         newCustomerName.value = btn.dataset.newCustomer;
         newModal.classList.add('active');

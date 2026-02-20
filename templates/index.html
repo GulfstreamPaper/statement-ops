@@ -6,6 +6,12 @@
       <p><strong>{{ customer_count }}</strong> customers</p>
       <p><strong>{{ group_count }}</strong> groups</p>
       <p>Today is <strong>{{ today.strftime('%B %d, %Y') }}</strong></p>
+      {% if dashboard_invoice_label %}
+        <p><small>Invoice source: {{ dashboard_invoice_label }}</small></p>
+      {% endif %}
+      {% if dashboard_error %}
+        <p><small>{{ dashboard_error }}</small></p>
+      {% endif %}
     </div>
     <div>
       <h2>Due Today</h2>
@@ -21,6 +27,80 @@
       <form method="post" action="{{ url_for('run_scheduled') }}">
         <button class="secondary" type="submit">Run Scheduled Now</button>
       </form>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Receivable Snapshot</h2>
+    <div class="stats-grid">
+      <div class="chart-card">
+        <p class="kpi-label">Total Receivable</p>
+        <p class="kpi-value">${{ "{:,.2f}".format(total_receivable) }}</p>
+        <p class="kpi-note"><small>Open invoices from current invoice source</small></p>
+        <h3 class="chart-subtitle">Overdue Share</h3>
+        {% if overdue_chart.has_data %}
+          <div class="pie-row">
+            <div class="pie-circle" style="background: {{ overdue_chart.gradient }}">
+              {% for slice_label in overdue_chart.labels %}
+                <span
+                  class="pie-slice-label"
+                  style="left: {{ "%.2f"|format(slice_label.x) }}%; top: {{ "%.2f"|format(slice_label.y) }}%;"
+                >
+                  {{ slice_label.text }}
+                </span>
+              {% endfor %}
+            </div>
+            <div class="chart-totals">
+              {% for item in overdue_chart.legend %}
+                <div class="chart-total-item">
+                  <p class="chart-total-label">{{ item.label }}</p>
+                  <p class="chart-total-value">${{ "{:,.2f}".format(item.value) }}</p>
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        {% else %}
+          <p><small>No open invoice data available yet.</small></p>
+        {% endif %}
+      </div>
+      <div class="chart-card">
+        <h3>Terms Assigned To Customers</h3>
+        {% if terms_chart.has_data %}
+          <div class="terms-stack">
+            <div class="treemap-square terms-treemap">
+              {% for tile in terms_chart.tiles %}
+                <div
+                  class="treemap-tile clickable"
+                  data-term-code="{{ tile.code }}"
+                  data-term-label="{{ tile.label }}"
+                  style="left: {{ "%.3f"|format(tile.x) }}%; top: {{ "%.3f"|format(tile.y) }}%; width: {{ "%.3f"|format(tile.w) }}%; height: {{ "%.3f"|format(tile.h) }}%; background: {{ tile.color }};"
+                >
+                  {% if tile.show_label %}
+                    <div class="treemap-title">{{ tile.label }}</div>
+                    <div class="treemap-meta">{{ "{:.1f}".format(tile.percent) }}%</div>
+                  {% endif %}
+                </div>
+              {% endfor %}
+            </div>
+            <div class="terms-legend-wrap">
+              <p class="terms-legend-heading">Assigned Terms</p>
+              <ul class="terms-legend-list">
+              {% for item in terms_chart.legend %}
+                <li>
+                  <span class="terms-label">
+                    <span class="legend-dot" style="background: {{ item.color }}"></span>
+                    {{ item.label }}
+                  </span>
+                  <span class="terms-value">{{ "{:,.0f}".format(item.value) }}</span>
+                </li>
+              {% endfor %}
+              </ul>
+            </div>
+          </div>
+        {% else %}
+          <p><small>No customer terms assigned yet.</small></p>
+        {% endif %}
+      </div>
     </div>
   </div>
 
@@ -53,4 +133,60 @@
       </tbody>
     </table>
   </div>
+
+  <div id="termsCustomersModal" class="modal">
+    <div class="modal-card">
+      <h3 id="termsCustomersTitle">Customers</h3>
+      <ul id="termsCustomersList" class="terms-customer-list"></ul>
+      <div class="actions">
+        <button type="button" class="secondary" id="termsCustomersClose">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const termsCustomers = {{ terms_customers | tojson }};
+    const termsModal = document.getElementById('termsCustomersModal');
+    const termsModalTitle = document.getElementById('termsCustomersTitle');
+    const termsModalList = document.getElementById('termsCustomersList');
+    const termsModalClose = document.getElementById('termsCustomersClose');
+
+    function openTermsModal(termCode, termLabel) {
+      const customers = termsCustomers[termCode] || [];
+      termsModalTitle.textContent = `${termLabel} (${customers.length})`;
+      termsModalList.innerHTML = '';
+      if (!customers.length) {
+        const li = document.createElement('li');
+        li.textContent = 'No customers found for this term.';
+        termsModalList.appendChild(li);
+      } else {
+        customers.forEach((name) => {
+          const li = document.createElement('li');
+          li.textContent = name;
+          termsModalList.appendChild(li);
+        });
+      }
+      termsModal.classList.add('active');
+    }
+
+    document.querySelectorAll('.treemap-tile.clickable').forEach((tile) => {
+      tile.addEventListener('click', () => {
+        const termCode = tile.dataset.termCode || '';
+        const termLabel = tile.dataset.termLabel || 'Term';
+        openTermsModal(termCode, termLabel);
+      });
+    });
+
+    termsModalClose.addEventListener('click', () => {
+      termsModal.classList.remove('active');
+      termsModalList.innerHTML = '';
+    });
+
+    termsModal.addEventListener('click', (event) => {
+      if (event.target === termsModal) {
+        termsModal.classList.remove('active');
+        termsModalList.innerHTML = '';
+      }
+    });
+  </script>
 {% endblock %}

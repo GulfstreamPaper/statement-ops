@@ -7,11 +7,12 @@ from email.utils import make_msgid
 import mimetypes
 import json
 import smtplib
+import math
 from io import BytesIO
 
 import pandas as pd
 from fpdf import FPDF
-from flask import Flask, render_template, request, redirect, url_for, flash, send_file, session
+from flask import Flask, render_template, request, redirect, url_for, flash, send_file, session, jsonify
 
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 DATA_DIR = os.environ.get("DATA_DIR", BASE_DIR)
@@ -408,6 +409,104 @@ def name_key(value):
     return normalize_name(value).lower()
 
 
+def parse_email_list(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return []
+    raw = str(value).replace(";", ",").replace("\n", ",")
+    seen = set()
+    emails = []
+    for token in raw.split(","):
+        email = token.strip()
+        if not email:
+            continue
+        key = email.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        emails.append(email)
+    return emails
+
+
+def normalize_email_value(value):
+    return ", ".join(parse_email_list(value))
+
+
+def has_email_value(value):
+    return bool(parse_email_list(value))
+
+
+def normalize_frequency(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    v = str(value).strip().lower().replace("_", " ").replace("-", " ")
+    v = " ".join(v.split())
+    mapping = {
+        "weekly": "weekly",
+        "week": "weekly",
+        "biweekly": "biweekly",
+        "bi weekly": "biweekly",
+        "every 2 weeks": "biweekly",
+        "monthly": "monthly",
+        "month": "monthly",
+        "none": "none",
+        "off": "none",
+    }
+    return mapping.get(v)
+
+
+def parse_day_of_week_value(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if not v:
+            return None
+        day_map = {
+            "monday": 0,
+            "mon": 0,
+            "tuesday": 1,
+            "tue": 1,
+            "wednesday": 2,
+            "wed": 2,
+            "thursday": 3,
+            "thu": 3,
+            "friday": 4,
+            "fri": 4,
+            "saturday": 5,
+            "sat": 5,
+            "sunday": 6,
+            "sun": 6,
+        }
+        if v in day_map:
+            return day_map[v]
+    return parse_int(value, None, 0, 6)
+
+
+def default_schedule_for_terms(terms_code):
+    if terms_code == "month_to_month":
+        return "monthly", 0, 1
+    return "weekly", 0, 1
+
+
+def ensure_recipient_email(recipient, provided_email=""):
+    current = normalize_email_value(recipient.get("email_to", ""))
+    if current:
+        recipient["email_to"] = current
+        return recipient
+
+    provided = normalize_email_value(provided_email)
+    if not provided:
+        raise RuntimeError("Missing recipient email")
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("UPDATE recipients SET email_to = ? WHERE id = ?", (provided, recipient["id"]))
+    conn.commit()
+    conn.close()
+    recipient["email_to"] = provided
+    return recipient
+
+
 def auth_enabled():
     return bool(APP_PASSWORD)
 
@@ -760,7 +859,7 @@ def get_recipients_terms_map():
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, group_name, terms_code, net_terms, recipient_type FROM recipients WHERE active = 1"
+        "SELECT id, group_name, terms_code, net_terms, recipient_type, email_to FROM recipients WHERE active = 1"
     )
     rows = cur.fetchall()
     conn.close()
@@ -771,6 +870,7 @@ def get_recipients_terms_map():
             "id": row["id"],
             "terms_code": terms_code,
             "recipient_type": row["recipient_type"] or "single",
+            "has_email": has_email_value(row["email_to"]),
         }
     return recipients_map
 
@@ -844,6 +944,330 @@ def get_grouped_customer_ids():
     rows = cur.fetchall()
     conn.close()
     return {row["customer_id"] for row in rows}
+
+
+def get_dashboard_terms_lookup():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, group_name, terms_code, net_terms FROM recipients WHERE recipient_type = 'single'"
+    )
+    singles = cur.fetchall()
+    cur.execute(
+        "SELECT c.group_name AS customer_name, g.terms_code AS group_terms_code, g.net_terms AS group_net_terms "
+        "FROM group_members gm "
+        "JOIN recipients c ON c.id = gm.customer_id "
+        "JOIN recipients g ON g.id = gm.group_id "
+        "WHERE c.recipient_type = 'single' AND g.recipient_type = 'group'"
+    )
+    grouped = cur.fetchall()
+    conn.close()
+
+    lookup = {}
+    for row in singles:
+        terms_code = row["terms_code"] or normalize_terms_code(row["net_terms"]) or "net_30"
+        lookup[name_key(row["group_name"])] = terms_code
+
+    # Group terms override single customer terms when membership exists.
+    for row in grouped:
+        terms_code = (
+            row["group_terms_code"]
+            or normalize_terms_code(row["group_net_terms"])
+            or "net_30"
+        )
+        lookup[name_key(row["customer_name"])] = terms_code
+    return lookup
+
+
+def get_terms_distribution(include_customers=False):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT s.group_name AS customer_name, s.terms_code AS single_terms_code, s.net_terms AS single_net_terms, "
+        "g.terms_code AS group_terms_code, g.net_terms AS group_net_terms "
+        "FROM recipients s "
+        "LEFT JOIN group_members gm ON gm.customer_id = s.id "
+        "LEFT JOIN recipients g ON g.id = gm.group_id "
+        "WHERE s.recipient_type = 'single'"
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    counts = {}
+    customers_by_terms = {}
+    for row in rows:
+        terms_code = row["group_terms_code"] or row["single_terms_code"]
+        if not terms_code:
+            terms_code = normalize_terms_code(row["group_net_terms"])
+        if not terms_code:
+            terms_code = normalize_terms_code(row["single_net_terms"])
+        if not terms_code:
+            terms_code = "net_30"
+        counts[terms_code] = counts.get(terms_code, 0) + 1
+        customer_name = normalize_name(row["customer_name"])
+        if customer_name:
+            bucket = customers_by_terms.setdefault(terms_code, {})
+            bucket[name_key(customer_name)] = customer_name
+
+    if not include_customers:
+        return counts
+
+    customers_sorted = {
+        code: sorted(names.values(), key=lambda n: n.lower())
+        for code, names in customers_by_terms.items()
+    }
+    return counts, customers_sorted
+
+
+def build_pie_chart(segments):
+    total = sum(float(value) for _, value, _ in segments)
+    if total <= 0:
+        return {
+            "has_data": False,
+            "gradient": "#d9d9d9",
+            "legend": [],
+            "labels": [],
+            "total": 0,
+        }
+
+    start = 0.0
+    parts = []
+    legend = []
+    labels = []
+    for label, value, color in segments:
+        value = float(value)
+        if value <= 0:
+            continue
+        pct = (value / total) * 100
+        mid = start + (pct / 2.0)
+        end = start + pct
+        parts.append(f"{color} {start:.2f}% {end:.2f}%")
+        legend.append(
+            {
+                "label": label,
+                "value": value,
+                "color": color,
+                "percent": pct,
+            }
+        )
+        if pct >= 5.0:
+            angle = ((mid / 100.0) * 360.0) - 90.0
+            rad = math.radians(angle)
+            labels.append(
+                {
+                    "label": label,
+                    "text": f"{pct:.1f}%",
+                    "x": 50.0 + (math.cos(rad) * 32.0),
+                    "y": 50.0 + (math.sin(rad) * 32.0),
+                    "color": color,
+                }
+            )
+        start = end
+
+    if not parts:
+        return {
+            "has_data": False,
+            "gradient": "#d9d9d9",
+            "legend": [],
+            "labels": [],
+            "total": 0,
+        }
+    return {
+        "has_data": True,
+        "gradient": f"conic-gradient({', '.join(parts)})",
+        "legend": legend,
+        "labels": labels,
+        "total": total,
+    }
+
+
+def build_treemap_chart(segments):
+    total = 0.0
+    for segment in segments:
+        if len(segment) == 4:
+            _, _, value, _ = segment
+        else:
+            _, value, _ = segment
+        total += float(value)
+    if total <= 0:
+        return {"has_data": False, "tiles": [], "legend": [], "total": 0}
+
+    items = []
+    for segment in segments:
+        if len(segment) == 4:
+            code, label, value, color = segment
+        else:
+            label, value, color = segment
+            code = label
+        value = float(value)
+        if value <= 0:
+            continue
+        items.append(
+            {
+                "code": code,
+                "label": label,
+                "value": value,
+                "color": color,
+                "percent": (value / total) * 100.0,
+            }
+        )
+    if not items:
+        return {"has_data": False, "tiles": [], "legend": [], "total": 0}
+
+    items.sort(key=lambda i: i["value"], reverse=True)
+    tiles = []
+
+    def split_slice(data, x, y, w, h):
+        if not data:
+            return
+        if len(data) == 1:
+            item = data[0]
+            area_pct = (item["value"] / total) * 100.0
+            tiles.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "h": h,
+                    "code": item["code"],
+                    "label": item["label"],
+                    "value": item["value"],
+                    "color": item["color"],
+                    "percent": item["percent"],
+                    "area_percent": area_pct,
+                    "show_label": w >= 9.0 and h >= 9.0,
+                }
+            )
+            return
+
+        subtotal = sum(item["value"] for item in data)
+        half = subtotal / 2.0
+        running = 0.0
+        split_index = 0
+        for idx, item in enumerate(data):
+            running += item["value"]
+            split_index = idx
+            if running >= half:
+                break
+
+        group_a = data[: split_index + 1]
+        group_b = data[split_index + 1 :]
+        if not group_b:
+            # Guard for degenerate split; enforce at least one item in each group.
+            group_a = data[:1]
+            group_b = data[1:]
+
+        sum_a = sum(item["value"] for item in group_a)
+        ratio_a = sum_a / subtotal if subtotal > 0 else 0.0
+
+        if w >= h:
+            w_a = w * ratio_a
+            split_slice(group_a, x, y, w_a, h)
+            split_slice(group_b, x + w_a, y, w - w_a, h)
+        else:
+            h_a = h * ratio_a
+            split_slice(group_a, x, y, w, h_a)
+            split_slice(group_b, x, y + h_a, w, h - h_a)
+
+    split_slice(items, 0.0, 0.0, 100.0, 100.0)
+
+    legend = [
+        {
+            "code": item["code"],
+            "label": item["label"],
+            "value": item["value"],
+            "color": item["color"],
+            "percent": item["percent"],
+        }
+        for item in items
+    ]
+
+    return {"has_data": True, "tiles": tiles, "legend": legend, "total": total}
+
+
+def compute_dashboard_financials():
+    result = {
+        "total_receivable": 0.0,
+        "overdue_amount": 0.0,
+        "current_amount": 0.0,
+        "invoice_label": None,
+        "error": None,
+    }
+    try:
+        invoice_file_id, invoice_path = get_invoice_for_run()
+        df = load_invoice_df(invoice_path)
+    except Exception as exc:
+        result["error"] = str(exc)
+        return result
+
+    if invoice_file_id:
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT filename FROM invoice_files WHERE id = ?", (invoice_file_id,))
+        row = cur.fetchone()
+        conn.close()
+        if row and row["filename"]:
+            result["invoice_label"] = row["filename"]
+    if not result["invoice_label"]:
+        result["invoice_label"] = os.path.basename(invoice_path)
+
+    terms_lookup = get_dashboard_terms_lookup()
+    open_items = []
+    total_receivable = 0.0
+
+    for _, row in df.iterrows():
+        val_total = pd.to_numeric(row.get("Order Total"), errors="coerce")
+        val_paid = pd.to_numeric(row.get("Paid Amount", 0), errors="coerce")
+        amt = 0.0 if pd.isna(val_total) else float(val_total)
+        paid = 0.0 if pd.isna(val_paid) else float(val_paid)
+        outstanding = amt - paid
+        if outstanding <= 0.01:
+            continue
+
+        customer = normalize_name(row.get("Customer Name"))
+        customer_key = name_key(customer)
+        terms_code = terms_lookup.get(customer_key, "net_30")
+        ship_date = parse_ship_date(row.get("Shipping Date"))
+        total_receivable += outstanding
+        open_items.append(
+            {
+                "customer_key": customer_key,
+                "terms_code": terms_code,
+                "ship_date": ship_date,
+                "outstanding": outstanding,
+            }
+        )
+
+    today = date.today()
+    overdue_amount = 0.0
+    grouped = {}
+    for item in open_items:
+        grouped.setdefault(item["customer_key"], []).append(item)
+
+    for items in grouped.values():
+        if not items:
+            continue
+        terms_code = items[0]["terms_code"] or "net_30"
+        if terms_code == "bill_to_bill":
+            sorted_items = sorted(items, key=lambda i: i["ship_date"])
+            for idx, item in enumerate(sorted_items):
+                ship_date = item["ship_date"]
+                if idx < len(sorted_items) - 1:
+                    due_date = sorted_items[idx + 1]["ship_date"]
+                else:
+                    due_date = ship_date + timedelta(days=15)
+                if today > due_date:
+                    overdue_amount += item["outstanding"]
+        else:
+            for item in items:
+                due_date = compute_due_date(item["ship_date"], terms_code)
+                if today > due_date:
+                    overdue_amount += item["outstanding"]
+
+    result["total_receivable"] = total_receivable
+    result["overdue_amount"] = overdue_amount
+    result["current_amount"] = max(total_receivable - overdue_amount, 0.0)
+    return result
 
 
 def compute_overdue_report(invoice_path):
@@ -1144,6 +1568,150 @@ def import_mappings_from_df(df):
     return added, updated, skipped, sorted(missing_groups)
 
 
+def import_bulk_customers_from_upload(upload_file):
+    df = load_upload_df(upload_file)
+    df = normalize_columns(df)
+
+    required = {"customer_name", "terms"}
+    missing_cols = sorted(required - set(df.columns))
+    if missing_cols:
+        raise RuntimeError(f"Missing required columns: {', '.join(missing_cols)}")
+
+    has_email_col = any(col in df.columns for col in ["email_to", "email", "emails", "email_address"])
+    has_frequency_col = "frequency" in df.columns
+    has_dow_col = any(col in df.columns for col in ["day_of_week", "weekday"])
+    has_dom_col = "day_of_month" in df.columns
+
+    latest_keys = set()
+    try:
+        latest_names, _ = get_latest_invoice_customer_names()
+        latest_keys = {name_key(name) for name in latest_names}
+    except Exception:
+        latest_keys = set()
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM recipients ORDER BY id ASC")
+    recipients = [dict(row) for row in cur.fetchall()]
+
+    single_by_key = {}
+    group_name_keys = set()
+    for rec in recipients:
+        key = name_key(rec["group_name"])
+        if rec["recipient_type"] == "single":
+            single_by_key[key] = rec
+        else:
+            group_name_keys.add(key)
+
+    allowed_keys = set(single_by_key.keys()) | latest_keys
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    added = 0
+    updated = 0
+    skipped = 0
+    skipped_details = []
+
+    for idx, row in df.iterrows():
+        row_no = idx + 2
+        customer_name = normalize_name(get_row_value(row, ["customer_name"]))
+        if not customer_name:
+            skipped += 1
+            skipped_details.append(f"Row {row_no}: missing customer name")
+            continue
+        key = name_key(customer_name)
+
+        if key not in allowed_keys:
+            skipped += 1
+            skipped_details.append(f"Row {row_no}: customer not in New or All lists")
+            continue
+
+        terms_code = normalize_terms_code(get_row_value(row, ["terms"]))
+        if not terms_code:
+            skipped += 1
+            skipped_details.append(f"Row {row_no}: invalid terms value")
+            continue
+        net_terms = get_terms_days(terms_code)
+
+        existing = single_by_key.get(key)
+        if existing:
+            updates = ["terms_code = ?", "net_terms = ?"]
+            values = [terms_code, net_terms]
+
+            if has_email_col:
+                email_to = normalize_email_value(
+                    get_row_value(row, ["email_to", "email", "emails", "email_address"])
+                )
+                if email_to:
+                    updates.append("email_to = ?")
+                    values.append(email_to)
+
+            if has_frequency_col:
+                frequency = normalize_frequency(get_row_value(row, ["frequency"]))
+                if frequency:
+                    updates.append("frequency = ?")
+                    values.append(frequency)
+
+            if has_dow_col:
+                day_of_week = parse_day_of_week_value(get_row_value(row, ["day_of_week", "weekday"]))
+                if day_of_week is not None:
+                    updates.append("day_of_week = ?")
+                    values.append(day_of_week)
+
+            if has_dom_col:
+                day_of_month = parse_int(get_row_value(row, ["day_of_month"]), None, 1, 28)
+                if day_of_month is not None:
+                    updates.append("day_of_month = ?")
+                    values.append(day_of_month)
+
+            values.append(existing["id"])
+            cur.execute(f"UPDATE recipients SET {', '.join(updates)} WHERE id = ?", values)
+            updated += 1
+            continue
+
+        if key in group_name_keys:
+            skipped += 1
+            skipped_details.append(f"Row {row_no}: name is already used by a group")
+            continue
+
+        if key not in latest_keys:
+            skipped += 1
+            skipped_details.append(f"Row {row_no}: new customer must exist in latest invoice file")
+            continue
+
+        frequency, day_of_week, day_of_month = default_schedule_for_terms(terms_code)
+        if has_frequency_col:
+            parsed_frequency = normalize_frequency(get_row_value(row, ["frequency"]))
+            if parsed_frequency:
+                frequency = parsed_frequency
+        if has_dow_col:
+            parsed_dow = parse_day_of_week_value(get_row_value(row, ["day_of_week", "weekday"]))
+            if parsed_dow is not None:
+                day_of_week = parsed_dow
+        if has_dom_col:
+            parsed_dom = parse_int(get_row_value(row, ["day_of_month"]), None, 1, 28)
+            if parsed_dom is not None:
+                day_of_month = parsed_dom
+
+        email_to = ""
+        if has_email_col:
+            email_to = normalize_email_value(
+                get_row_value(row, ["email_to", "email", "emails", "email_address"])
+            )
+
+        cur.execute(
+            "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, active, created_at) "
+            "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, 1, ?)",
+            (customer_name, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, now),
+        )
+        new_id = cur.lastrowid
+        single_by_key[key] = {"id": new_id, "group_name": customer_name}
+        allowed_keys.add(key)
+        added += 1
+
+    conn.commit()
+    conn.close()
+    return added, updated, skipped, skipped_details
+
+
 def build_excel_template(columns, sheet_name):
     output = BytesIO()
     df = pd.DataFrame(columns=columns)
@@ -1374,6 +1942,10 @@ def generate_invoice_pdf(customer_data, output_path, terms_code):
 # --- Email ---
 
 def send_email(to_emails, subject, body, attachment_path=None, cc_emails=None, extra_attachments=None):
+    to_emails = normalize_email_value(to_emails)
+    if not to_emails:
+        raise RuntimeError("Missing recipient email")
+
     host = get_setting("smtp_host")
     port = int(get_setting("smtp_port", "587") or "587")
     username = get_setting("smtp_user")
@@ -1559,6 +2131,19 @@ def get_latest_invoice_file():
     return row if row else None
 
 
+def get_latest_invoice_customer_names():
+    latest = get_latest_invoice_file()
+    if not latest:
+        return [], None
+
+    latest_path = latest["path"]
+    invoice_label = os.path.basename(latest_path)
+    df = load_invoice_df(latest_path)
+    names = [normalize_name(name) for name in df["Customer Name"].tolist()]
+    unique_names = sorted({name for name in names if name})
+    return unique_names, invoice_label
+
+
 def get_invoice_for_run():
     source = get_setting("invoice_source", "latest_upload")
     if source == "path":
@@ -1649,7 +2234,10 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type):
             "Kind regards,\n"
             "Redway Group Inc"
         )
-        send_email(recipient["email_to"], subject, body, output_path, cc_emails=get_notice_cc("statement"))
+        recipient_email = normalize_email_value(recipient["email_to"])
+        if not recipient_email:
+            raise RuntimeError("Missing recipient email")
+        send_email(recipient_email, subject, body, output_path, cc_emails=get_notice_cc("statement"))
 
         conn = get_db()
         cur = conn.cursor()
@@ -1674,6 +2262,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type):
             "No outstanding invoices to include",
             "No invoice rows matched this recipient",
             "Group has no members",
+            "Missing recipient email",
         }:
             status = "skipped"
         cur.execute(
@@ -1683,7 +2272,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type):
         conn.commit()
         conn.close()
         if run_type == "scheduled":
-            return status, None
+            return status, message
         raise
 
 
@@ -1784,6 +2373,45 @@ def index():
         and not (r["recipient_type"] == "single" and r["id"] in grouped_customer_ids)
     ]
 
+    financials = compute_dashboard_financials()
+    overdue_chart = build_pie_chart(
+        [
+            ("Overdue", financials["overdue_amount"], "#d14f4f"),
+            ("Current", financials["current_amount"], "#2d8a4e"),
+        ]
+    )
+
+    terms_counts, terms_customers = get_terms_distribution(include_customers=True)
+    term_color_map = {
+        "net_7": "#1f77b4",
+        "net_15": "#ff7f0e",
+        "net_20": "#2ca02c",
+        "net_30": "#d62728",
+        "net_45": "#9467bd",
+        "cod": "#8c564b",
+        "bill_to_bill": "#e377c2",
+        "month_to_month": "#7f7f7f",
+        "week_to_week": "#bcbd22",
+    }
+    terms_segments = []
+    known_codes = [code for code, _ in TERM_OPTIONS]
+    for code in known_codes:
+        count = terms_counts.get(code, 0)
+        if count > 0:
+            terms_segments.append(
+                (
+                    code,
+                    TERM_CODE_TO_LABEL.get(code, code),
+                    float(count),
+                    term_color_map.get(code, "#17becf"),
+                )
+            )
+    for code, count in terms_counts.items():
+        if code in known_codes or count <= 0:
+            continue
+        terms_segments.append((code, TERM_CODE_TO_LABEL.get(code, code), float(count), "#17becf"))
+    terms_chart = build_treemap_chart(terms_segments)
+
     return render_template(
         "index.html",
         customer_count=customer_count,
@@ -1791,6 +2419,14 @@ def index():
         runs=runs,
         due=due,
         today=today,
+        total_receivable=financials["total_receivable"],
+        total_overdue_amount=financials["overdue_amount"],
+        total_current_amount=financials["current_amount"],
+        dashboard_invoice_label=financials["invoice_label"],
+        dashboard_error=financials["error"],
+        overdue_chart=overdue_chart,
+        terms_chart=terms_chart,
+        terms_customers=terms_customers,
     )
 
 
@@ -1808,6 +2444,7 @@ def overdue_report():
     for row in rows:
         recipient = recipients_map.get(row["group_name"])
         row["recipient_id"] = recipient["id"] if recipient else None
+        row["has_email"] = bool(recipient and recipient.get("has_email"))
         skipped_raw = row.get("skipped_invoices") or "[]"
         try:
             row["skipped_invoices"] = json.loads(skipped_raw)
@@ -1924,6 +2561,8 @@ def overdue_report_send(recipient_id):
         if not recipient:
             flash("Recipient not found", "error")
             return redirect(url_for("overdue_report"))
+        recipient = dict(recipient)
+        recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
         output_path = build_statement_pdf(recipient, invoice_path)
         subject = f"Overdue Notice {date.today().strftime('%m/%d/%Y')}"
@@ -1977,6 +2616,8 @@ def overdue_report_skipped(recipient_id):
         if not recipient:
             flash("Recipient not found", "error")
             return redirect(url_for("overdue_report"))
+        recipient = dict(recipient)
+        recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
         attachments = []
         for idx, file in enumerate(uploaded_files):
@@ -2055,6 +2696,8 @@ def overdue_report_short_paid(recipient_id):
         if not recipient:
             flash("Recipient not found", "error")
             return redirect(url_for("overdue_report"))
+        recipient = dict(recipient)
+        recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
         attachments = []
         for idx, file in enumerate(uploaded_files):
@@ -2123,6 +2766,26 @@ def download_statement(recipient_id):
         return f"Statement download failed: {exc}", 400
 
 
+@app.route("/customers/bulk-template")
+def customers_bulk_template():
+    columns = [
+        "Customer Name",
+        "Terms",
+        "Email",
+        "Frequency",
+        "Day of Week",
+        "Day of Month",
+    ]
+    output = build_excel_template(columns, "bulk_customers")
+    filename = "customers_bulk_update_template.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 @app.route("/customers", methods=["GET", "POST"])
 @app.route("/recipients", methods=["GET", "POST"])
 def customers():
@@ -2134,7 +2797,7 @@ def customers():
 
         if form_type == "create_single":
             customer_name = request.form.get("customer_name", "").strip()
-            email_to = request.form.get("email_to", "").strip()
+            email_to = normalize_email_value(request.form.get("email_to", ""))
             terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
             net_terms = get_terms_days(terms_code)
             frequency = request.form.get("frequency", "weekly")
@@ -2142,9 +2805,9 @@ def customers():
             day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
             active = 1 if request.form.get("active") == "on" else 0
 
-            if not customer_name or not email_to:
+            if not customer_name:
                 conn.close()
-                flash("Customer name and email are required.", "error")
+                flash("Customer name is required.", "error")
                 return redirect(url_for("customers"))
 
             cur.execute(
@@ -2168,7 +2831,7 @@ def customers():
 
         if form_type == "create_group":
             group_name = request.form.get("group_name", "").strip()
-            email_to = request.form.get("email_to", "").strip()
+            email_to = normalize_email_value(request.form.get("email_to", ""))
             terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
             net_terms = get_terms_days(terms_code)
             frequency = request.form.get("frequency", "weekly")
@@ -2176,9 +2839,9 @@ def customers():
             day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
             active = 1 if request.form.get("active") == "on" else 0
 
-            if not group_name or not email_to:
+            if not group_name:
                 conn.close()
-                flash("Group name and email are required.", "error")
+                flash("Group name is required.", "error")
                 return redirect(url_for("customers"))
 
             cur.execute(
@@ -2254,6 +2917,21 @@ def customers():
             flash("Customer name updated.", "success")
             return redirect(url_for("customers"))
 
+        if form_type == "bulk_update":
+            upload = request.files.get("bulk_file")
+            conn.close()
+            try:
+                added, updated, skipped, skipped_details = import_bulk_customers_from_upload(upload)
+                flash(f"Bulk update complete. Added {added}, updated {updated}, skipped {skipped}.", "success")
+                if skipped_details:
+                    preview = "; ".join(skipped_details[:5])
+                    if len(skipped_details) > 5:
+                        preview += "; ..."
+                    flash(f"Skipped details: {preview}", "error")
+            except Exception as exc:
+                flash(f"Bulk update failed: {exc}", "error")
+            return redirect(url_for("customers"))
+
         conn.close()
         flash("Unknown action.", "error")
         return redirect(url_for("customers"))
@@ -2288,18 +2966,12 @@ def customers():
 
     new_customers = []
     invoice_label = None
-    latest = get_latest_invoice_file()
-    if latest:
-        latest_path = latest["path"]
-        invoice_label = os.path.basename(latest_path)
-        try:
-            df = load_invoice_df(latest_path)
-            names = [normalize_name(name) for name in df["Customer Name"].tolist()]
-            unique_names = sorted({name for name in names if name})
-            existing_keys = {name_key(r["group_name"]) for r in singles_all}
-            new_customers = [name for name in unique_names if name_key(name) not in existing_keys]
-        except Exception as exc:
-            flash(f"Unable to load latest invoice file for new customers: {exc}", "error")
+    try:
+        unique_names, invoice_label = get_latest_invoice_customer_names()
+        existing_keys = {name_key(r["group_name"]) for r in singles_all}
+        new_customers = [name for name in unique_names if name_key(name) not in existing_keys]
+    except Exception as exc:
+        flash(f"Unable to load latest invoice file for new customers: {exc}", "error")
 
     term_labels = {code: label for code, label in TERM_OPTIONS}
     return render_template(
@@ -2319,6 +2991,27 @@ def customers():
     )
 
 
+@app.route("/customers/<int:recipient_id>/emails", methods=["POST"])
+@app.route("/recipients/<int:recipient_id>/emails", methods=["POST"])
+def update_customer_emails(recipient_id):
+    email_to = normalize_email_value(request.form.get("email_to", ""))
+    if not email_to:
+        return jsonify({"ok": False, "error": "Email is required"}), 400
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM recipients WHERE id = ?", (recipient_id,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({"ok": False, "error": "Customer not found"}), 404
+
+    cur.execute("UPDATE recipients SET email_to = ? WHERE id = ?", (email_to, recipient_id))
+    conn.commit()
+    conn.close()
+    return jsonify({"ok": True, "email_to": email_to})
+
+
 @app.route("/customers/<int:recipient_id>/edit", methods=["GET", "POST"])
 @app.route("/recipients/<int:recipient_id>/edit", methods=["GET", "POST"])
 def edit_customer(recipient_id):
@@ -2333,7 +3026,7 @@ def edit_customer(recipient_id):
 
     if request.method == "POST":
         group_name = request.form.get("group_name", "").strip()
-        email_to = request.form.get("email_to", "").strip()
+        email_to = normalize_email_value(request.form.get("email_to", ""))
         terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
         net_terms = get_terms_days(terms_code)
         frequency = request.form.get("frequency", "weekly")
@@ -2341,9 +3034,9 @@ def edit_customer(recipient_id):
         day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
         active = 1 if request.form.get("active") == "on" else 0
 
-        if not group_name or not email_to:
+        if not group_name:
             conn.close()
-            flash("Name and email are required.", "error")
+            flash("Name is required.", "error")
             return redirect(url_for("edit_customer", recipient_id=recipient_id))
 
         cur.execute(
@@ -2511,6 +3204,8 @@ def send_manual():
             conn.close()
             if not recipient:
                 raise RuntimeError("Recipient not found")
+            recipient = dict(recipient)
+            recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
             run_for_recipient(recipient, invoice_path, invoice_file_id, "manual")
             flash("Statement sent", "success")
@@ -2642,18 +3337,24 @@ def run_scheduled():
         sent = 0
         skipped = 0
         failed = 0
+        missing_email_customers = []
         for recipient in recipients_list:
             if recipient["recipient_type"] == "single" and recipient["id"] in grouped_customer_ids:
                 continue
             if is_due(recipient, today):
-                status, _ = run_for_recipient(recipient, invoice_path, invoice_file_id, "scheduled")
+                status, detail = run_for_recipient(recipient, invoice_path, invoice_file_id, "scheduled")
                 if status == "sent":
                     sent += 1
                 elif status == "skipped":
                     skipped += 1
+                    if detail == "Missing recipient email":
+                        missing_email_customers.append(recipient["group_name"])
                 else:
                     failed += 1
         flash(f"Scheduled run complete. Sent {sent}, skipped {skipped}, failed {failed}.", "success")
+        if missing_email_customers:
+            names = ", ".join(sorted(set(missing_email_customers)))
+            flash(f"Missing email (not sent): {names}", "error")
     except Exception as e:
         flash(f"Scheduled run failed: {e}", "error")
     return redirect(url_for("index"))
