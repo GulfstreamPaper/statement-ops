@@ -1,13 +1,22 @@
 import sys
 from datetime import date
 
-from app import init_db, get_db, get_invoice_for_run, is_due, run_for_recipient, get_grouped_customer_ids
+from app import (
+    init_db,
+    get_db,
+    get_invoice_for_run,
+    is_due,
+    run_for_recipient,
+    get_grouped_customer_ids,
+    load_invoice_df,
+)
 
 
 def main():
     init_db()
     try:
         invoice_file_id, invoice_path = get_invoice_for_run()
+        invoice_df = load_invoice_df(invoice_path)
     except Exception as exc:
         print(f"ERROR: {exc}")
         return 1
@@ -28,7 +37,13 @@ def main():
             continue
         if is_due(recipient, today):
             try:
-                status, _ = run_for_recipient(recipient, invoice_path, invoice_file_id, "scheduled")
+                status, _ = run_for_recipient(
+                    recipient,
+                    invoice_path,
+                    invoice_file_id,
+                    "scheduled",
+                    preloaded_df=invoice_df,
+                )
                 if status == "sent":
                     sent += 1
                     print(f"Sent: {recipient['group_name']}")

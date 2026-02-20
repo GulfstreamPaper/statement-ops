@@ -8,6 +8,8 @@ import mimetypes
 import json
 import smtplib
 import math
+import time
+import threading
 from io import BytesIO
 
 import pandas as pd
@@ -185,6 +187,41 @@ def init_db():
             FOREIGN KEY(recipient_id) REFERENCES recipients(id),
             FOREIGN KEY(invoice_file_id) REFERENCES invoice_files(id)
         );
+
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            last_heartbeat TEXT,
+            invoice_file_id INTEGER,
+            invoice_path TEXT,
+            requested_by TEXT,
+            total_items INTEGER DEFAULT 0,
+            processed_items INTEGER DEFAULT 0,
+            sent_count INTEGER DEFAULT 0,
+            skipped_count INTEGER DEFAULT 0,
+            failed_count INTEGER DEFAULT 0,
+            missing_email_customers TEXT DEFAULT '[]',
+            error TEXT,
+            FOREIGN KEY(invoice_file_id) REFERENCES invoice_files(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS scheduled_job_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            recipient_id INTEGER NOT NULL,
+            recipient_name TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            error TEXT,
+            attempts INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            FOREIGN KEY(job_id) REFERENCES scheduled_jobs(id),
+            FOREIGN KEY(recipient_id) REFERENCES recipients(id)
+        );
         """
     )
     cur.execute("PRAGMA table_info(recipients)")
@@ -248,6 +285,22 @@ def init_db():
         "CREATE INDEX IF NOT EXISTS idx_customer_alias_recipient "
         "ON customer_aliases(recipient_id)"
     )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_jobs_status "
+        "ON scheduled_jobs(status, created_at)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_scheduled_job_items_job_status "
+        "ON scheduled_job_items(job_id, status, id)"
+    )
+    cur.execute("PRAGMA table_info(scheduled_jobs)")
+    scheduled_cols = [row[1] for row in cur.fetchall()]
+    if scheduled_cols and "last_heartbeat" not in scheduled_cols:
+        cur.execute("ALTER TABLE scheduled_jobs ADD COLUMN last_heartbeat TEXT")
+    if scheduled_cols and "missing_email_customers" not in scheduled_cols:
+        cur.execute("ALTER TABLE scheduled_jobs ADD COLUMN missing_email_customers TEXT DEFAULT '[]'")
+    if scheduled_cols and "requested_by" not in scheduled_cols:
+        cur.execute("ALTER TABLE scheduled_jobs ADD COLUMN requested_by TEXT")
 
     conn.commit()
     conn.close()
@@ -529,6 +582,7 @@ def auth_enabled():
 
 @app.before_request
 def enforce_login():
+    ensure_schedule_worker_running()
     if not auth_enabled():
         return
     if request.endpoint in {"login", "static", "app_logo"}:
@@ -2124,6 +2178,10 @@ def send_email(to_emails, subject, body, attachment_path=None, cc_emails=None, e
     sender = get_setting("smtp_from", username)
     use_tls = get_setting("smtp_tls", "true").lower() == "true"
     logo_path = get_setting("logo_path", "")
+    try:
+        smtp_timeout = float(get_setting("smtp_timeout", "20") or "20")
+    except Exception:
+        smtp_timeout = 20.0
 
     if not host or not sender:
         raise RuntimeError("SMTP settings are incomplete")
@@ -2193,7 +2251,7 @@ def send_email(to_emails, subject, body, attachment_path=None, cc_emails=None, e
             filename=attachment.get("filename", "attachment"),
         )
 
-    with smtplib.SMTP(host, port) as server:
+    with smtplib.SMTP(host, port, timeout=smtp_timeout) as server:
         if use_tls:
             server.starttls()
         if username and password:
@@ -2245,6 +2303,378 @@ def is_due(recipient, today):
         return last_sent.month != today.month or last_sent.year != today.year
 
     return False
+
+
+SCHEDULE_WORKER_LOCK = threading.Lock()
+SCHEDULE_WORKER_THREAD = None
+
+
+def now_ts():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def parse_json_list(value):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return parsed
+    except Exception:
+        pass
+    return []
+
+
+def get_setting_float(key, default=0.0, min_value=None, max_value=None):
+    raw = get_setting(key, str(default))
+    try:
+        value = float(raw)
+    except Exception:
+        value = float(default)
+    if min_value is not None and value < min_value:
+        value = min_value
+    if max_value is not None and value > max_value:
+        value = max_value
+    return value
+
+
+def get_due_recipients(today=None):
+    if today is None:
+        today = date.today()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM recipients ORDER BY group_name ASC")
+    rows = cur.fetchall()
+    conn.close()
+
+    grouped_customer_ids = get_grouped_customer_ids()
+    due = []
+    for row in rows:
+        if row["recipient_type"] == "single" and row["id"] in grouped_customer_ids:
+            continue
+        if is_due(row, today):
+            due.append(dict(row))
+    return due
+
+
+def get_active_scheduled_job():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM scheduled_jobs WHERE status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    job = dict(row)
+    job["missing_email_customers"] = parse_json_list(job.get("missing_email_customers"))
+    return job
+
+
+def get_recent_scheduled_jobs(limit=10):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM scheduled_jobs ORDER BY created_at DESC LIMIT ?",
+        (int(limit),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    jobs = []
+    for row in rows:
+        job = dict(row)
+        total = int(job.get("total_items") or 0)
+        processed = int(job.get("processed_items") or 0)
+        job["progress_pct"] = round((processed / total) * 100, 1) if total > 0 else 0.0
+        job["missing_email_customers"] = parse_json_list(job.get("missing_email_customers"))
+        jobs.append(job)
+    return jobs
+
+
+def create_scheduled_job(requested_by="system"):
+    invoice_file_id, invoice_path = get_invoice_for_run()
+    due_recipients = get_due_recipients(date.today())
+
+    max_recipients = parse_int(get_setting("scheduled_max_recipients", "0"), 0, 0)
+    if max_recipients > 0:
+        due_recipients = due_recipients[:max_recipients]
+
+    if not due_recipients:
+        return None, "No statements due today."
+
+    now = now_ts()
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("BEGIN IMMEDIATE")
+    cur.execute(
+        "SELECT id, status FROM scheduled_jobs WHERE status IN ('queued', 'running') ORDER BY created_at DESC LIMIT 1"
+    )
+    active = cur.fetchone()
+    if active:
+        conn.rollback()
+        conn.close()
+        return None, f"Scheduled run already {active['status']} (Job #{active['id']})."
+
+    cur.execute(
+        "INSERT INTO scheduled_jobs(status, created_at, last_heartbeat, invoice_file_id, invoice_path, requested_by, total_items) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("queued", now, now, invoice_file_id, invoice_path, requested_by or "system", len(due_recipients)),
+    )
+    job_id = cur.lastrowid
+    cur.executemany(
+        "INSERT INTO scheduled_job_items(job_id, recipient_id, recipient_name, status, created_at) VALUES (?, ?, ?, ?, ?)",
+        [(job_id, r["id"], r["group_name"], "pending", now) for r in due_recipients],
+    )
+    conn.commit()
+    conn.close()
+    return job_id, None
+
+
+def claim_next_scheduled_job():
+    now = now_ts()
+    stale_seconds = parse_int(get_setting("scheduled_stale_seconds", "900"), 900, 60)
+    stale_cutoff = (datetime.now() - timedelta(seconds=stale_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE scheduled_jobs SET status = 'queued', started_at = NULL "
+        "WHERE status = 'running' AND (last_heartbeat IS NULL OR last_heartbeat < ?)",
+        (stale_cutoff,),
+    )
+    conn.commit()
+
+    cur.execute(
+        "SELECT id FROM scheduled_jobs WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return None
+
+    job_id = int(row["id"])
+    cur.execute(
+        "UPDATE scheduled_jobs SET status = 'running', started_at = COALESCE(started_at, ?), last_heartbeat = ? "
+        "WHERE id = ? AND status = 'queued'",
+        (now, now, job_id),
+    )
+    claimed = cur.rowcount == 1
+    conn.commit()
+    conn.close()
+    return job_id if claimed else None
+
+
+def mark_scheduled_job_failed(job_id, error_message):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE scheduled_jobs SET status = 'failed', finished_at = ?, last_heartbeat = ?, error = ? WHERE id = ?",
+        (now_ts(), now_ts(), str(error_message), job_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_retryable_send_error(message):
+    text = str(message or "").lower()
+    tokens = [
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "temporary",
+        "connection unexpectedly closed",
+        "connection reset",
+        "server disconnected",
+        "service not available",
+        "try again",
+        "smtpserverdisconnected",
+        "421",
+        "450",
+        "451",
+        "452",
+        "454",
+    ]
+    return any(token in text for token in tokens)
+
+
+def process_scheduled_job(job_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (job_id,))
+    job = cur.fetchone()
+    conn.close()
+    if not job:
+        return
+
+    invoice_path = job["invoice_path"]
+    invoice_file_id = job["invoice_file_id"]
+    job_created_at = job["created_at"]
+    try:
+        invoice_df = load_invoice_df(invoice_path)
+    except Exception as exc:
+        mark_scheduled_job_failed(job_id, exc)
+        return
+
+    send_delay = get_setting_float("scheduled_send_delay_seconds", 1.0, 0.0, 30.0)
+    retry_count = parse_int(get_setting("scheduled_send_retries", "2"), 2, 0, 5)
+    retry_backoff = get_setting_float("scheduled_retry_backoff_seconds", 3.0, 0.0, 60.0)
+    max_attempts = retry_count + 1
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM scheduled_job_items WHERE job_id = ? AND status IN ('pending', 'running') ORDER BY id ASC",
+        (job_id,),
+    )
+    items = cur.fetchall()
+
+    processed = int(job["processed_items"] or 0)
+    sent = int(job["sent_count"] or 0)
+    skipped = int(job["skipped_count"] or 0)
+    failed = int(job["failed_count"] or 0)
+    missing_names = set(parse_json_list(job["missing_email_customers"]))
+
+    for idx, item in enumerate(items):
+        recipient_id = int(item["recipient_id"])
+        recipient_name = item["recipient_name"]
+        attempts = int(item["attempts"] or 0)
+        final_status = "failed"
+        detail = "Unknown failure"
+
+        while attempts < max_attempts:
+            attempts += 1
+            now = now_ts()
+            cur.execute(
+                "UPDATE scheduled_job_items SET status = 'running', started_at = COALESCE(started_at, ?), attempts = ? WHERE id = ?",
+                (now, attempts, item["id"]),
+            )
+            cur.execute(
+                "UPDATE scheduled_jobs SET last_heartbeat = ? WHERE id = ?",
+                (now, job_id),
+            )
+            conn.commit()
+
+            cur.execute("SELECT * FROM recipients WHERE id = ?", (recipient_id,))
+            recipient = cur.fetchone()
+            if not recipient:
+                final_status = "failed"
+                detail = "Recipient not found"
+                break
+
+            if invoice_file_id is None:
+                cur.execute(
+                    "SELECT id FROM statement_runs WHERE recipient_id = ? AND run_type = 'scheduled' "
+                    "AND status = 'sent' AND created_at >= ? AND invoice_file_id IS NULL "
+                    "ORDER BY id DESC LIMIT 1",
+                    (recipient_id, job_created_at),
+                )
+            else:
+                cur.execute(
+                    "SELECT id FROM statement_runs WHERE recipient_id = ? AND run_type = 'scheduled' "
+                    "AND status = 'sent' AND created_at >= ? AND invoice_file_id = ? "
+                    "ORDER BY id DESC LIMIT 1",
+                    (recipient_id, job_created_at, invoice_file_id),
+                )
+            already_sent = cur.fetchone()
+            if already_sent:
+                final_status = "sent"
+                detail = "Recovered previous sent state"
+                break
+
+            status, detail = run_for_recipient(
+                dict(recipient),
+                invoice_path,
+                invoice_file_id,
+                "scheduled",
+                preloaded_df=invoice_df,
+            )
+            if status == "error" and attempts < max_attempts and is_retryable_send_error(detail):
+                if retry_backoff > 0:
+                    time.sleep(retry_backoff * attempts)
+                continue
+            final_status = "failed" if status == "error" else status
+            break
+
+        if final_status == "sent":
+            sent += 1
+        elif final_status == "skipped":
+            skipped += 1
+            if detail == "Missing recipient email":
+                missing_names.add(recipient_name)
+        else:
+            failed += 1
+        processed += 1
+
+        cur.execute(
+            "UPDATE scheduled_job_items SET status = ?, error = ?, attempts = ?, finished_at = ? WHERE id = ?",
+            (final_status, str(detail), attempts, now_ts(), item["id"]),
+        )
+        cur.execute(
+            "UPDATE scheduled_jobs SET processed_items = ?, sent_count = ?, skipped_count = ?, failed_count = ?, "
+            "last_heartbeat = ?, missing_email_customers = ? WHERE id = ?",
+            (
+                processed,
+                sent,
+                skipped,
+                failed,
+                now_ts(),
+                json.dumps(sorted(missing_names)),
+                job_id,
+            ),
+        )
+        conn.commit()
+
+        if send_delay > 0 and idx < len(items) - 1:
+            time.sleep(send_delay)
+
+    summary_error = ""
+    if failed > 0:
+        cur.execute(
+            "SELECT error FROM scheduled_job_items "
+            "WHERE job_id = ? AND status = 'failed' AND error IS NOT NULL AND TRIM(error) <> '' "
+            "ORDER BY id DESC LIMIT 3",
+            (job_id,),
+        )
+        samples = [row["error"] for row in cur.fetchall() if row["error"]]
+        if samples:
+            summary_error = "; ".join(samples)
+        else:
+            summary_error = f"{failed} recipient(s) failed."
+
+    cur.execute(
+        "UPDATE scheduled_jobs SET status = 'completed', finished_at = ?, last_heartbeat = ?, error = ?, "
+        "missing_email_customers = ? WHERE id = ?",
+        (now_ts(), now_ts(), summary_error, json.dumps(sorted(missing_names)), job_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def scheduled_worker_loop():
+    while True:
+        try:
+            job_id = claim_next_scheduled_job()
+            if not job_id:
+                time.sleep(2.0)
+                continue
+            process_scheduled_job(job_id)
+        except Exception as exc:
+            app.logger.exception("Scheduled worker failed: %s", exc)
+            time.sleep(2.0)
+
+
+def ensure_schedule_worker_running():
+    global SCHEDULE_WORKER_THREAD
+    with SCHEDULE_WORKER_LOCK:
+        if SCHEDULE_WORKER_THREAD and SCHEDULE_WORKER_THREAD.is_alive():
+            return
+        SCHEDULE_WORKER_THREAD = threading.Thread(
+            target=scheduled_worker_loop,
+            name="schedule-worker",
+            daemon=True,
+        )
+        SCHEDULE_WORKER_THREAD.start()
 
 
 def load_invoice_df(invoice_path):
@@ -2400,7 +2830,7 @@ def build_recipient_df(recipient, df):
     return customer_df
 
 
-def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type):
+def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type, preloaded_df=None):
     run_id = None
     conn = get_db()
     cur = conn.cursor()
@@ -2414,7 +2844,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type):
     conn.close()
 
     try:
-        df = load_invoice_df(invoice_path)
+        df = preloaded_df if preloaded_df is not None else load_invoice_df(invoice_path)
         customer_df = build_recipient_df(recipient, df)
 
         os.makedirs(OUT_DIR, exist_ok=True)
@@ -2564,6 +2994,8 @@ def index():
     cur.execute("SELECT * FROM recipients ORDER BY group_name ASC")
     recipients = cur.fetchall()
     conn.close()
+    active_schedule_job = get_active_scheduled_job()
+    schedule_jobs = get_recent_scheduled_jobs(limit=20)
 
     today = date.today()
     grouped_customer_ids = get_grouped_customer_ids()
@@ -2628,6 +3060,8 @@ def index():
         overdue_chart=overdue_chart,
         terms_chart=terms_chart,
         terms_customers=terms_customers,
+        active_schedule_job=active_schedule_job,
+        schedule_jobs=schedule_jobs,
     )
 
 
@@ -3219,6 +3653,8 @@ def customers():
     inactive_singles = [r for r in singles_all if not r["active"]]
     active_groups = [r for r in groups_all if r["active"]]
     inactive_groups = [r for r in groups_all if not r["active"]]
+    grouped_single_ids = get_grouped_customer_ids()
+    active_single_only = [r for r in active_singles if r["id"] not in grouped_single_ids]
 
     members_by_group = get_group_members_by_group_id()
     group_name_map = {g["id"]: g["group_name"] for g in groups_all}
@@ -3250,6 +3686,7 @@ def customers():
         new_customers=new_customers,
         groups=active_groups,
         singles=active_singles,
+        single_only=active_single_only,
         all_recipients=active_groups + active_singles,
         inactive_recipients=inactive_groups + inactive_singles,
         all_singles=singles_all,
@@ -3541,6 +3978,11 @@ def settings():
             "smtp_pass",
             "smtp_from",
             "smtp_tls",
+            "smtp_timeout",
+            "scheduled_send_delay_seconds",
+            "scheduled_send_retries",
+            "scheduled_retry_backoff_seconds",
+            "scheduled_max_recipients",
             "company_name",
             "company_subtitle",
             "company_address",
@@ -3577,6 +4019,11 @@ def settings():
         "smtp_pass",
         "smtp_from",
         "smtp_tls",
+        "smtp_timeout",
+        "scheduled_send_delay_seconds",
+        "scheduled_send_retries",
+        "scheduled_retry_backoff_seconds",
+        "scheduled_max_recipients",
         "company_name",
         "company_subtitle",
         "company_address",
@@ -3597,38 +4044,17 @@ def settings():
 @app.route("/run-scheduled", methods=["POST"])
 def run_scheduled():
     try:
-        invoice_file_id, invoice_path = get_invoice_for_run()
-        conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM recipients ORDER BY group_name ASC")
-        recipients_list = cur.fetchall()
-        conn.close()
-
-        today = date.today()
-        grouped_customer_ids = get_grouped_customer_ids()
-        sent = 0
-        skipped = 0
-        failed = 0
-        missing_email_customers = []
-        for recipient in recipients_list:
-            if recipient["recipient_type"] == "single" and recipient["id"] in grouped_customer_ids:
-                continue
-            if is_due(recipient, today):
-                status, detail = run_for_recipient(recipient, invoice_path, invoice_file_id, "scheduled")
-                if status == "sent":
-                    sent += 1
-                elif status == "skipped":
-                    skipped += 1
-                    if detail == "Missing recipient email":
-                        missing_email_customers.append(recipient["group_name"])
-                else:
-                    failed += 1
-        flash(f"Scheduled run complete. Sent {sent}, skipped {skipped}, failed {failed}.", "success")
-        if missing_email_customers:
-            names = ", ".join(sorted(set(missing_email_customers)))
-            flash(f"Missing email (not sent): {names}", "error")
+        ensure_schedule_worker_running()
+        job_id, error = create_scheduled_job(session.get("username", "system"))
+        if error:
+            flash(error, "error")
+        else:
+            flash(
+                f"Scheduled run queued (Job #{job_id}). Processing in background, one customer at a time.",
+                "success",
+            )
     except Exception as e:
-        flash(f"Scheduled run failed: {e}", "error")
+        flash(f"Could not queue scheduled run: {e}", "error")
     return redirect(url_for("index"))
 
 

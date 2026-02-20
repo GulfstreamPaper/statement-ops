@@ -27,6 +27,9 @@
       <form method="post" action="{{ url_for('run_scheduled') }}">
         <button class="secondary" type="submit">Run Scheduled Now</button>
       </form>
+      {% if active_schedule_job %}
+        <p><small>Active Job #{{ active_schedule_job['id'] }} ({{ active_schedule_job['status'] }}): {{ active_schedule_job['processed_items'] }}/{{ active_schedule_job['total_items'] }} processed</small></p>
+      {% endif %}
     </div>
   </div>
 
@@ -129,6 +132,52 @@
           </tr>
         {% else %}
           <tr><td colspan="6">No runs yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h2>Scheduled Queue History</h2>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Job</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Started</th>
+          <th>Finished</th>
+          <th>Progress</th>
+          <th>Sent</th>
+          <th>Skipped</th>
+          <th>Failed</th>
+          <th>Missing Email</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for job in schedule_jobs %}
+          <tr>
+            <td>#{{ job['id'] }}</td>
+            <td>{{ job['status'] }}</td>
+            <td>{{ job['created_at'] }}</td>
+            <td>{{ job['started_at'] or '-' }}</td>
+            <td>{{ job['finished_at'] or '-' }}</td>
+            <td>{{ job['processed_items'] }}/{{ job['total_items'] }} ({{ "{:.1f}".format(job['progress_pct']) }}%)</td>
+            <td>{{ job['sent_count'] }}</td>
+            <td>{{ job['skipped_count'] }}</td>
+            <td>{{ job['failed_count'] }}</td>
+            <td>
+              {% if job['missing_email_customers'] %}
+                {{ job['missing_email_customers'] | join(', ') }}
+              {% else %}
+                -
+              {% endif %}
+            </td>
+            <td>{{ job['error'] or '-' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="11">No scheduled jobs yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>

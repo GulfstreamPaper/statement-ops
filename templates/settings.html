@@ -27,8 +27,32 @@
           <input name="smtp_from" value="{{ settings['smtp_from'] }}" />
         </div>
         <div>
+          <label>SMTP Timeout (seconds)</label>
+          <input name="smtp_timeout" value="{{ settings['smtp_timeout'] or '20' }}" />
+        </div>
+        <div>
           <label>Use TLS</label>
           <input name="smtp_tls" type="checkbox" {% if settings['smtp_tls'] != 'false' %}checked{% endif %} />
+        </div>
+      </div>
+
+      <h2>Scheduled Run Controls</h2>
+      <div class="row">
+        <div>
+          <label>Send Delay (seconds)</label>
+          <input name="scheduled_send_delay_seconds" value="{{ settings['scheduled_send_delay_seconds'] or '1' }}" />
+        </div>
+        <div>
+          <label>Retries Per Recipient</label>
+          <input name="scheduled_send_retries" value="{{ settings['scheduled_send_retries'] or '2' }}" />
+        </div>
+        <div>
+          <label>Retry Backoff (seconds)</label>
+          <input name="scheduled_retry_backoff_seconds" value="{{ settings['scheduled_retry_backoff_seconds'] or '3' }}" />
+        </div>
+        <div>
+          <label>Max Recipients Per Run (0 = no limit)</label>
+          <input name="scheduled_max_recipients" value="{{ settings['scheduled_max_recipients'] or '0' }}" />
         </div>
       </div>
 

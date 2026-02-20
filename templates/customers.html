@@ -5,6 +5,7 @@
     <div class="tabs">
       <button class="tab active" type="button" data-tab="tab-new">New</button>
       <button class="tab" type="button" data-tab="tab-groups">Groups</button>
+      <button class="tab" type="button" data-tab="tab-single">Single</button>
       <button class="tab" type="button" data-tab="tab-all">All</button>
       <button class="tab" type="button" data-tab="tab-inactive">Inactive</button>
     </div>
@@ -182,6 +183,48 @@
           </tr>
         {% else %}
           <tr><td colspan="6">No groups yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="panel tab-panel" id="tab-single">
+    <h2>Single Customers</h2>
+    <p><small>This list shows only single customers that are not assigned to any group.</small></p>
+    <div class="row">
+      <div>
+        <label>Search</label>
+        <input id="singleSearch" placeholder="Search name or email" />
+      </div>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Terms</th>
+          <th>Frequency</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in single_only %}
+          <tr data-search="{{ (r['group_name'] ~ ' ' ~ r['email_to']) | lower }}">
+            <td>{{ r['group_name'] }}</td>
+            <td>{{ r['email_to'] }}</td>
+            <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
+            <td>{{ r['frequency'] }}</td>
+            <td class="actions">
+              <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
+              <button type="button" class="secondary open-merge-btn" data-source-id="{{ r['id'] }}" data-source-name="{{ r['group_name'] }}">Merge</button>
+              <a class="button-link edit" href="{{ url_for('edit_customer', recipient_id=r['id']) }}">Edit</a>
+              <form method="post" action="{{ url_for('delete_customer', recipient_id=r['id']) }}" onsubmit="return confirm('Delete customer?')">
+                <button type="submit">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5">No single customers outside groups.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -411,18 +454,31 @@
   </div>
 
   <script>
+    const CUSTOMER_PAGE_STATE_KEY = 'customers_page_state_v1';
     const tabs = document.querySelectorAll('.tab');
     const panels = document.querySelectorAll('.tab-panel');
 
-    tabs.forEach((tab) => {
-      tab.addEventListener('click', () => {
-        tabs.forEach((btn) => btn.classList.remove('active'));
-        panels.forEach((panel) => panel.classList.remove('active'));
-        tab.classList.add('active');
-        const target = document.getElementById(tab.dataset.tab);
-        if (target) target.classList.add('active');
+    function setActiveTab(tabId) {
+      tabs.forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.tab === tabId);
       });
-    });
+      panels.forEach((panel) => {
+        panel.classList.toggle('active', panel.id === tabId);
+      });
+    }
+
+    function getActiveTab() {
+      const active = document.querySelector('.tab.active');
+      return active ? active.dataset.tab : 'tab-new';
+    }
+
+    function loadPageState() {
+      try {
+        return JSON.parse(localStorage.getItem(CUSTOMER_PAGE_STATE_KEY) || '{}');
+      } catch (err) {
+        return {};
+      }
+    }
 
     const newSearch = document.getElementById('newCustomerSearch');
     const newRows = document.querySelectorAll('#tab-new tbody tr[data-search]');
@@ -431,10 +487,6 @@
       newRows.forEach((row) => {
         row.style.display = row.dataset.search.includes(query) ? '' : 'none';
       });
-    }
-    if (newSearch) {
-      newSearch.addEventListener('input', filterNew);
-      filterNew();
     }
 
     const groupSearch = document.getElementById('groupSearch');
@@ -445,9 +497,14 @@
         row.style.display = row.dataset.search.includes(query) ? '' : 'none';
       });
     }
-    if (groupSearch) {
-      groupSearch.addEventListener('input', filterGroups);
-      filterGroups();
+
+    const singleSearch = document.getElementById('singleSearch');
+    const singleRows = document.querySelectorAll('#tab-single tbody tr[data-search]');
+    function filterSingles() {
+      const query = (singleSearch.value || '').toLowerCase();
+      singleRows.forEach((row) => {
+        row.style.display = row.dataset.search.includes(query) ? '' : 'none';
+      });
     }
 
     const allSearch = document.getElementById('allSearch');
@@ -462,11 +519,87 @@
         row.style.display = matchesText && matchesType ? '' : 'none';
       });
     }
-    if (allSearch) {
-      allSearch.addEventListener('input', filterAll);
-      allTypeFilter.addEventListener('change', filterAll);
-      filterAll();
+
+    function savePageState() {
+      const state = {
+        tab: getActiveTab(),
+        newSearch: newSearch ? newSearch.value : '',
+        groupSearch: groupSearch ? groupSearch.value : '',
+        singleSearch: singleSearch ? singleSearch.value : '',
+        allSearch: allSearch ? allSearch.value : '',
+        allTypeFilter: allTypeFilter ? allTypeFilter.value : '',
+      };
+      localStorage.setItem(CUSTOMER_PAGE_STATE_KEY, JSON.stringify(state));
     }
+
+    tabs.forEach((tab) => {
+      tab.addEventListener('click', () => {
+        setActiveTab(tab.dataset.tab);
+        savePageState();
+      });
+    });
+
+    if (newSearch) {
+      newSearch.addEventListener('input', () => {
+        filterNew();
+        savePageState();
+      });
+    }
+    if (groupSearch) {
+      groupSearch.addEventListener('input', () => {
+        filterGroups();
+        savePageState();
+      });
+    }
+    if (singleSearch) {
+      singleSearch.addEventListener('input', () => {
+        filterSingles();
+        savePageState();
+      });
+    }
+    if (allSearch) {
+      allSearch.addEventListener('input', () => {
+        filterAll();
+        savePageState();
+      });
+    }
+    if (allTypeFilter) {
+      allTypeFilter.addEventListener('change', () => {
+        filterAll();
+        savePageState();
+      });
+    }
+
+    const pageState = loadPageState();
+    if (pageState.tab && document.getElementById(pageState.tab)) {
+      setActiveTab(pageState.tab);
+    }
+    if (newSearch && typeof pageState.newSearch === 'string') {
+      newSearch.value = pageState.newSearch;
+    }
+    if (groupSearch && typeof pageState.groupSearch === 'string') {
+      groupSearch.value = pageState.groupSearch;
+    }
+    if (singleSearch && typeof pageState.singleSearch === 'string') {
+      singleSearch.value = pageState.singleSearch;
+    }
+    if (allSearch && typeof pageState.allSearch === 'string') {
+      allSearch.value = pageState.allSearch;
+    }
+    if (allTypeFilter && typeof pageState.allTypeFilter === 'string') {
+      allTypeFilter.value = pageState.allTypeFilter;
+    }
+    filterNew();
+    filterGroups();
+    filterSingles();
+    filterAll();
+
+    document.querySelectorAll('form').forEach((form) => {
+      form.addEventListener('submit', savePageState);
+    });
+    document.querySelectorAll('a.button-link.edit').forEach((link) => {
+      link.addEventListener('click', savePageState);
+    });
 
     const newModal = document.getElementById('newCustomerModal');
     const newCustomerName = document.getElementById('newCustomerName');
