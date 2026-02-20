@@ -106,6 +106,14 @@ def init_db():
             FOREIGN KEY(recipient_id) REFERENCES recipients(id)
         );
 
+        CREATE TABLE IF NOT EXISTS customer_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            alias_name TEXT UNIQUE NOT NULL,
+            recipient_id INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(recipient_id) REFERENCES recipients(id)
+        );
+
         CREATE TABLE IF NOT EXISTS group_members (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             group_id INTEGER NOT NULL,
@@ -231,6 +239,14 @@ def init_db():
     cur.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_group_member_unique "
         "ON group_members(group_id, customer_id)"
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_customer_alias_name "
+        "ON customer_aliases(alias_name)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_customer_alias_recipient "
+        "ON customer_aliases(recipient_id)"
     )
 
     conn.commit()
@@ -884,14 +900,25 @@ def get_single_recipients_map():
     )
     rows = cur.fetchall()
     conn.close()
+    aliases_by_id = get_alias_names_by_recipient_ids([row["id"] for row in rows])
     mapping = {}
     for row in rows:
         terms_code = row["terms_code"] or normalize_terms_code(row["net_terms"]) or "net_30"
-        mapping[name_key(row["group_name"])] = {
+        keys = []
+        base_key = name_key(row["group_name"])
+        if base_key:
+            keys.append(base_key)
+        for alias_name in aliases_by_id.get(row["id"], []):
+            alias_key = name_key(alias_name)
+            if alias_key:
+                keys.append(alias_key)
+        payload = {
             "id": row["id"],
             "group_name": row["group_name"],
             "terms_code": terms_code,
         }
+        for key in keys:
+            mapping[key] = payload
     return mapping
 
 
@@ -899,7 +926,7 @@ def get_group_membership_map():
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT c.group_name AS customer_name, g.id AS group_id, g.group_name AS group_name, "
+        "SELECT c.id AS customer_id, c.group_name AS customer_name, g.id AS group_id, g.group_name AS group_name, "
         "g.terms_code, g.net_terms "
         "FROM group_members gm "
         "JOIN recipients c ON c.id = gm.customer_id "
@@ -908,14 +935,25 @@ def get_group_membership_map():
     )
     rows = cur.fetchall()
     conn.close()
+    aliases_by_id = get_alias_names_by_recipient_ids([row["customer_id"] for row in rows])
     mapping = {}
     for row in rows:
         terms_code = row["terms_code"] or normalize_terms_code(row["net_terms"]) or "net_30"
-        mapping[name_key(row["customer_name"])] = {
+        keys = []
+        base_key = name_key(row["customer_name"])
+        if base_key:
+            keys.append(base_key)
+        for alias_name in aliases_by_id.get(row["customer_id"], []):
+            alias_key = name_key(alias_name)
+            if alias_key:
+                keys.append(alias_key)
+        payload = {
             "group_id": row["group_id"],
             "group_name": row["group_name"],
             "terms_code": terms_code,
         }
+        for key in keys:
+            mapping[key] = payload
     return mapping
 
 
@@ -946,15 +984,87 @@ def get_grouped_customer_ids():
     return {row["customer_id"] for row in rows}
 
 
-def get_dashboard_terms_lookup():
+def get_alias_names_by_recipient_ids(recipient_ids):
+    if not recipient_ids:
+        return {}
+    ids = [int(rid) for rid in recipient_ids if rid is not None]
+    if not ids:
+        return {}
+
+    placeholders = ",".join(["?"] * len(ids))
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, group_name, terms_code, net_terms FROM recipients WHERE recipient_type = 'single'"
+        f"SELECT recipient_id, alias_name FROM customer_aliases WHERE recipient_id IN ({placeholders})",
+        ids,
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    aliases = {}
+    for row in rows:
+        alias_name = normalize_name(row["alias_name"])
+        if not alias_name:
+            continue
+        aliases.setdefault(row["recipient_id"], []).append(alias_name)
+    return aliases
+
+
+def get_all_single_name_keys():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, group_name FROM recipients WHERE recipient_type = 'single'")
+    singles = cur.fetchall()
+    aliases_by_id = {}
+    ids = [row["id"] for row in singles]
+    if ids:
+        placeholders = ",".join(["?"] * len(ids))
+        cur.execute(
+            f"SELECT recipient_id, alias_name FROM customer_aliases WHERE recipient_id IN ({placeholders})",
+            ids,
+        )
+        for row in cur.fetchall():
+            alias_name = normalize_name(row["alias_name"])
+            if not alias_name:
+                continue
+            aliases_by_id.setdefault(row["recipient_id"], []).append(alias_name)
+    conn.close()
+
+    keys = set()
+    for row in singles:
+        base = name_key(row["group_name"])
+        if base:
+            keys.add(base)
+        for alias_name in aliases_by_id.get(row["id"], []):
+            alias_key = name_key(alias_name)
+            if alias_key:
+                keys.add(alias_key)
+    return keys
+
+
+def get_dashboard_terms_lookup(include_excluded=False):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, group_name, active, terms_code, net_terms FROM recipients WHERE recipient_type = 'single'"
     )
     singles = cur.fetchall()
+    single_ids = [row["id"] for row in singles]
+    aliases_by_id = {}
+    if single_ids:
+        placeholders = ",".join(["?"] * len(single_ids))
+        cur.execute(
+            f"SELECT recipient_id, alias_name FROM customer_aliases WHERE recipient_id IN ({placeholders})",
+            single_ids,
+        )
+        for row in cur.fetchall():
+            alias_name = normalize_name(row["alias_name"])
+            if not alias_name:
+                continue
+            aliases_by_id.setdefault(row["recipient_id"], []).append(alias_name)
     cur.execute(
-        "SELECT c.group_name AS customer_name, g.terms_code AS group_terms_code, g.net_terms AS group_net_terms "
+        "SELECT c.id AS customer_id, c.group_name AS customer_name, c.active AS customer_active, "
+        "g.active AS group_active, g.terms_code AS group_terms_code, g.net_terms AS group_net_terms "
         "FROM group_members gm "
         "JOIN recipients c ON c.id = gm.customer_id "
         "JOIN recipients g ON g.id = gm.group_id "
@@ -964,18 +1074,56 @@ def get_dashboard_terms_lookup():
     conn.close()
 
     lookup = {}
-    for row in singles:
-        terms_code = row["terms_code"] or normalize_terms_code(row["net_terms"]) or "net_30"
-        lookup[name_key(row["group_name"])] = terms_code
+    excluded = set()
+    grouped_customer_ids = set()
 
-    # Group terms override single customer terms when membership exists.
     for row in grouped:
+        customer_id = row["customer_id"]
+        grouped_customer_ids.add(customer_id)
+        keys = []
+        base_key = name_key(row["customer_name"])
+        if base_key:
+            keys.append(base_key)
+        for alias_name in aliases_by_id.get(customer_id, []):
+            alias_key = name_key(alias_name)
+            if alias_key:
+                keys.append(alias_key)
+        if not row["customer_active"] or not row["group_active"]:
+            for key in keys:
+                excluded.add(key)
+                lookup.pop(key, None)
+            continue
         terms_code = (
             row["group_terms_code"]
             or normalize_terms_code(row["group_net_terms"])
             or "net_30"
         )
-        lookup[name_key(row["customer_name"])] = terms_code
+        for key in keys:
+            lookup[key] = terms_code
+            excluded.discard(key)
+
+    for row in singles:
+        customer_id = row["id"]
+        if customer_id in grouped_customer_ids:
+            continue
+        keys = []
+        base_key = name_key(row["group_name"])
+        if base_key:
+            keys.append(base_key)
+        for alias_name in aliases_by_id.get(customer_id, []):
+            alias_key = name_key(alias_name)
+            if alias_key:
+                keys.append(alias_key)
+        if not row["active"]:
+            for key in keys:
+                excluded.add(key)
+            continue
+        terms_code = row["terms_code"] or normalize_terms_code(row["net_terms"]) or "net_30"
+        for key in keys:
+            lookup[key] = terms_code
+
+    if include_excluded:
+        return lookup, excluded
     return lookup
 
 
@@ -988,14 +1136,23 @@ def get_terms_distribution(include_customers=False):
         "FROM recipients s "
         "LEFT JOIN group_members gm ON gm.customer_id = s.id "
         "LEFT JOIN recipients g ON g.id = gm.group_id "
-        "WHERE s.recipient_type = 'single'"
+        "WHERE s.recipient_type = 'single' "
+        "AND s.active = 1 "
+        "AND (gm.group_id IS NULL OR (g.recipient_type = 'group' AND g.active = 1))"
     )
     rows = cur.fetchall()
     conn.close()
 
     counts = {}
     customers_by_terms = {}
+    seen_customers = set()
     for row in rows:
+        customer_name = normalize_name(row["customer_name"])
+        customer_key = name_key(customer_name)
+        if not customer_key or customer_key in seen_customers:
+            continue
+        seen_customers.add(customer_key)
+
         terms_code = row["group_terms_code"] or row["single_terms_code"]
         if not terms_code:
             terms_code = normalize_terms_code(row["group_net_terms"])
@@ -1004,10 +1161,9 @@ def get_terms_distribution(include_customers=False):
         if not terms_code:
             terms_code = "net_30"
         counts[terms_code] = counts.get(terms_code, 0) + 1
-        customer_name = normalize_name(row["customer_name"])
         if customer_name:
             bucket = customers_by_terms.setdefault(terms_code, {})
-            bucket[name_key(customer_name)] = customer_name
+            bucket[customer_key] = customer_name
 
     if not include_customers:
         return counts
@@ -1211,7 +1367,7 @@ def compute_dashboard_financials():
     if not result["invoice_label"]:
         result["invoice_label"] = os.path.basename(invoice_path)
 
-    terms_lookup = get_dashboard_terms_lookup()
+    terms_lookup, excluded_customer_keys = get_dashboard_terms_lookup(include_excluded=True)
     open_items = []
     total_receivable = 0.0
 
@@ -1226,6 +1382,8 @@ def compute_dashboard_financials():
 
         customer = normalize_name(row.get("Customer Name"))
         customer_key = name_key(customer)
+        if customer_key in excluded_customer_keys:
+            continue
         terms_code = terms_lookup.get(customer_key, "net_30")
         ship_date = parse_ship_date(row.get("Shipping Date"))
         total_receivable += outstanding
@@ -1595,15 +1753,30 @@ def import_bulk_customers_from_upload(upload_file):
     recipients = [dict(row) for row in cur.fetchall()]
 
     single_by_key = {}
+    single_by_id = {}
     group_name_keys = set()
     for rec in recipients:
         key = name_key(rec["group_name"])
         if rec["recipient_type"] == "single":
             single_by_key[key] = rec
+            single_by_id[rec["id"]] = rec
         else:
             group_name_keys.add(key)
 
-    allowed_keys = set(single_by_key.keys()) | latest_keys
+    alias_lookup = {}
+    if single_by_id:
+        placeholders = ",".join(["?"] * len(single_by_id))
+        cur.execute(
+            f"SELECT alias_name, recipient_id FROM customer_aliases WHERE recipient_id IN ({placeholders})",
+            list(single_by_id.keys()),
+        )
+        for row in cur.fetchall():
+            alias_key = name_key(row["alias_name"])
+            rec = single_by_id.get(row["recipient_id"])
+            if alias_key and rec:
+                alias_lookup[alias_key] = rec
+
+    allowed_keys = set(single_by_key.keys()) | set(alias_lookup.keys()) | latest_keys
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     added = 0
     updated = 0
@@ -1631,7 +1804,7 @@ def import_bulk_customers_from_upload(upload_file):
             continue
         net_terms = get_terms_days(terms_code)
 
-        existing = single_by_key.get(key)
+        existing = single_by_key.get(key) or alias_lookup.get(key)
         if existing:
             updates = ["terms_code = ?", "net_terms = ?"]
             values = [terms_code, net_terms]
@@ -2171,13 +2344,37 @@ def get_group_member_names(group_id):
     return [row["group_name"] for row in rows]
 
 
+def get_group_member_records(group_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT r.id, r.group_name FROM group_members gm "
+        "JOIN recipients r ON r.id = gm.customer_id "
+        "WHERE gm.group_id = ? AND r.active = 1",
+        (group_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def build_recipient_df(recipient, df):
     df = df.copy()
     df["_customer_key"] = df["Customer Name"].apply(name_key)
 
     if recipient["recipient_type"] == "group":
-        members = get_group_member_names(recipient["id"])
-        member_keys = {name_key(name) for name in members if name_key(name)}
+        members = get_group_member_records(recipient["id"])
+        member_ids = [row["id"] for row in members]
+        aliases_by_id = get_alias_names_by_recipient_ids(member_ids)
+        member_keys = set()
+        for member in members:
+            base_key = name_key(member["group_name"])
+            if base_key:
+                member_keys.add(base_key)
+            for alias_name in aliases_by_id.get(member["id"], []):
+                alias_key = name_key(alias_name)
+                if alias_key:
+                    member_keys.add(alias_key)
         if not member_keys:
             raise RuntimeError("Group has no members")
         customer_df = df[df["_customer_key"].isin(member_keys)].copy()
@@ -2185,8 +2382,16 @@ def build_recipient_df(recipient, df):
             raise RuntimeError("No invoice rows matched this recipient")
         customer_df["Location"] = customer_df["Customer Name"]
     else:
-        key = name_key(recipient["group_name"])
-        customer_df = df[df["_customer_key"] == key].copy()
+        recipient_keys = set()
+        base_key = name_key(recipient["group_name"])
+        if base_key:
+            recipient_keys.add(base_key)
+        aliases_by_id = get_alias_names_by_recipient_ids([recipient["id"]])
+        for alias_name in aliases_by_id.get(recipient["id"], []):
+            alias_key = name_key(alias_name)
+            if alias_key:
+                recipient_keys.add(alias_key)
+        customer_df = df[df["_customer_key"].isin(recipient_keys)].copy()
         if customer_df.empty:
             raise RuntimeError("No invoice rows matched this recipient")
         if "Location" in customer_df.columns:
@@ -2917,6 +3122,76 @@ def customers():
             flash("Customer name updated.", "success")
             return redirect(url_for("customers"))
 
+        if form_type == "merge_single":
+            source_id = parse_int(request.form.get("source_id"), None)
+            target_id = parse_int(request.form.get("target_id"), None)
+            if not source_id or not target_id:
+                conn.close()
+                flash("Select source and target customers for merge.", "error")
+                return redirect(url_for("customers"))
+            if source_id == target_id:
+                conn.close()
+                flash("Source and target must be different customers.", "error")
+                return redirect(url_for("customers"))
+
+            cur.execute("SELECT * FROM recipients WHERE id = ?", (source_id,))
+            source = cur.fetchone()
+            cur.execute("SELECT * FROM recipients WHERE id = ?", (target_id,))
+            target = cur.fetchone()
+            if not source or not target:
+                conn.close()
+                flash("Source or target customer not found.", "error")
+                return redirect(url_for("customers"))
+            if source["recipient_type"] != "single" or target["recipient_type"] != "single":
+                conn.close()
+                flash("Merge is only available for single customers.", "error")
+                return redirect(url_for("customers"))
+
+            now_merge = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            source_name = normalize_name(source["group_name"])
+            target_name = normalize_name(target["group_name"])
+
+            merged_email = normalize_email_value(
+                ",".join([target["email_to"] or "", source["email_to"] or ""])
+            )
+            if merged_email != normalize_email_value(target["email_to"]):
+                cur.execute(
+                    "UPDATE recipients SET email_to = ? WHERE id = ?",
+                    (merged_email, target_id),
+                )
+
+            cur.execute(
+                "UPDATE customer_aliases SET recipient_id = ? WHERE recipient_id = ?",
+                (target_id, source_id),
+            )
+            if name_key(source_name) and name_key(source_name) != name_key(target_name):
+                cur.execute(
+                    "INSERT INTO customer_aliases(alias_name, recipient_id, created_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(alias_name) DO UPDATE SET recipient_id = excluded.recipient_id",
+                    (source_name, target_id, now_merge),
+                )
+
+            cur.execute("SELECT group_id FROM group_members WHERE customer_id = ?", (source_id,))
+            source_group_rows = cur.fetchall()
+            if source_group_rows:
+                cur.executemany(
+                    "INSERT OR IGNORE INTO group_members(group_id, customer_id, created_at) VALUES (?, ?, ?)",
+                    [(row["group_id"], target_id, now_merge) for row in source_group_rows],
+                )
+            cur.execute("DELETE FROM group_members WHERE customer_id = ?", (source_id,))
+            cur.execute("UPDATE statement_runs SET recipient_id = ? WHERE recipient_id = ?", (target_id, source_id))
+            cur.execute("UPDATE notice_sends SET recipient_id = ? WHERE recipient_id = ?", (target_id, source_id))
+            cur.execute("UPDATE customer_mappings SET recipient_id = ? WHERE recipient_id = ?", (target_id, source_id))
+            cur.execute("DELETE FROM recipients WHERE id = ?", (source_id,))
+
+            conn.commit()
+            conn.close()
+            flash(
+                f"Merged {source_name} into {target_name}. Alias saved for statement matching.",
+                "success",
+            )
+            return redirect(url_for("customers"))
+
         if form_type == "bulk_update":
             upload = request.files.get("bulk_file")
             conn.close()
@@ -2968,7 +3243,7 @@ def customers():
     invoice_label = None
     try:
         unique_names, invoice_label = get_latest_invoice_customer_names()
-        existing_keys = {name_key(r["group_name"]) for r in singles_all}
+        existing_keys = get_all_single_name_keys()
         new_customers = [name for name in unique_names if name_key(name) not in existing_keys]
     except Exception as exc:
         flash(f"Unable to load latest invoice file for new customers: {exc}", "error")
@@ -3115,6 +3390,7 @@ def delete_customer(recipient_id):
     conn = get_db()
     cur = conn.cursor()
     cur.execute("DELETE FROM group_members WHERE group_id = ? OR customer_id = ?", (recipient_id, recipient_id))
+    cur.execute("DELETE FROM customer_aliases WHERE recipient_id = ?", (recipient_id,))
     cur.execute("DELETE FROM recipients WHERE id = ?", (recipient_id,))
     conn.commit()
     conn.close()

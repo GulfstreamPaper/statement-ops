@@ -233,6 +233,9 @@
             </td>
             <td class="actions">
               <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
+              {% if r['recipient_type'] == 'single' %}
+                <button type="button" class="secondary open-merge-btn" data-source-id="{{ r['id'] }}" data-source-name="{{ r['group_name'] }}">Merge</button>
+              {% endif %}
               <a class="button-link edit" href="{{ url_for('edit_customer', recipient_id=r['id']) }}">Edit</a>
               <form method="post" action="{{ url_for('delete_customer', recipient_id=r['id']) }}" onsubmit="return confirm('Delete customer?')">
                 <button type="submit">Delete</button>
@@ -269,6 +272,9 @@
             <td>{{ r['frequency'] }}</td>
             <td class="actions">
               <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
+              {% if r['recipient_type'] == 'single' %}
+                <button type="button" class="secondary open-merge-btn" data-source-id="{{ r['id'] }}" data-source-name="{{ r['group_name'] }}">Merge</button>
+              {% endif %}
               <a class="button-link edit" href="{{ url_for('edit_customer', recipient_id=r['id']) }}">Edit</a>
               <form method="post" action="{{ url_for('delete_customer', recipient_id=r['id']) }}" onsubmit="return confirm('Delete customer?')">
                 <button type="submit">Delete</button>
@@ -369,6 +375,36 @@
         <div class="actions">
           <button type="submit">Update</button>
           <button type="button" class="secondary" id="closeUpdateExisting">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="modal" id="mergeSingleModal">
+    <div class="modal-card">
+      <h3>Merge Single Customers</h3>
+      <form method="post">
+        <input type="hidden" name="form_type" value="merge_single" />
+        <input type="hidden" name="source_id" id="mergeSourceId" />
+        <input type="hidden" name="target_id" id="mergeTargetId" />
+        <p><small>Source customer (will be deleted, kept as alias): <strong id="mergeSourceName"></strong></small></p>
+        <div class="row">
+          <div>
+            <label>Search target customer</label>
+            <input id="mergeTargetSearch" placeholder="Search customer name" />
+          </div>
+        </div>
+        <div class="picker-list" id="mergeTargetList">
+          {% for customer in all_singles %}
+            <div class="picker-item merge-target-item" data-id="{{ customer['id'] }}" data-name="{{ customer['group_name'] }}" data-search="{{ customer['group_name'] | lower }}">
+              {{ customer['group_name'] }}
+            </div>
+          {% endfor %}
+        </div>
+        <p><small>Selected target: <span id="mergeTargetLabel">None</span></small></p>
+        <div class="actions">
+          <button type="submit">Merge</button>
+          <button type="button" class="secondary" id="closeMergeSingle">Cancel</button>
         </div>
       </form>
     </div>
@@ -528,6 +564,84 @@
     if (closeUpdateExisting) {
       closeUpdateExisting.addEventListener('click', () => {
         updateExistingModal.classList.remove('active');
+      });
+    }
+
+    const mergeSingleModal = document.getElementById('mergeSingleModal');
+    const mergeSourceId = document.getElementById('mergeSourceId');
+    const mergeSourceName = document.getElementById('mergeSourceName');
+    const mergeTargetId = document.getElementById('mergeTargetId');
+    const mergeTargetLabel = document.getElementById('mergeTargetLabel');
+    const mergeTargetSearch = document.getElementById('mergeTargetSearch');
+    const mergeTargetItems = document.querySelectorAll('.merge-target-item');
+    const closeMergeSingle = document.getElementById('closeMergeSingle');
+    const mergeForm = mergeSingleModal ? mergeSingleModal.querySelector('form') : null;
+
+    function resetMergeSelection() {
+      mergeTargetId.value = '';
+      mergeTargetLabel.textContent = 'None';
+    }
+
+    function filterMergeTargets() {
+      const query = (mergeTargetSearch.value || '').toLowerCase();
+      const sourceId = mergeSourceId.value;
+      mergeTargetItems.forEach((item) => {
+        const matchesText = item.dataset.search.includes(query);
+        const isSource = item.dataset.id === sourceId;
+        item.style.display = matchesText && !isSource ? '' : 'none';
+      });
+    }
+
+    document.querySelectorAll('.open-merge-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        mergeSourceId.value = btn.dataset.sourceId;
+        mergeSourceName.textContent = btn.dataset.sourceName;
+        mergeTargetSearch.value = '';
+        resetMergeSelection();
+        filterMergeTargets();
+        mergeSingleModal.classList.add('active');
+      });
+    });
+
+    mergeTargetItems.forEach((item) => {
+      item.addEventListener('click', () => {
+        mergeTargetId.value = item.dataset.id;
+        mergeTargetLabel.textContent = item.dataset.name;
+      });
+    });
+
+    if (mergeTargetSearch) {
+      mergeTargetSearch.addEventListener('input', filterMergeTargets);
+    }
+
+    if (closeMergeSingle) {
+      closeMergeSingle.addEventListener('click', () => {
+        mergeSingleModal.classList.remove('active');
+        mergeSourceId.value = '';
+        mergeSourceName.textContent = '';
+        mergeTargetSearch.value = '';
+        resetMergeSelection();
+      });
+    }
+
+    if (mergeForm) {
+      mergeForm.addEventListener('submit', (event) => {
+        if (!mergeTargetId.value) {
+          event.preventDefault();
+          alert('Please select a target customer for merge.');
+        }
+      });
+    }
+
+    if (mergeSingleModal) {
+      mergeSingleModal.addEventListener('click', (event) => {
+        if (event.target === mergeSingleModal) {
+          mergeSingleModal.classList.remove('active');
+          mergeSourceId.value = '';
+          mergeSourceName.textContent = '';
+          mergeTargetSearch.value = '';
+          resetMergeSelection();
+        }
       });
     }
   </script>
