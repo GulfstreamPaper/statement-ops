@@ -4409,6 +4409,15 @@ def settings():
     allowed_tabs = {"general", "templates"}
     if request.method == "POST":
         form_type = request.form.get("form_type", "general")
+        if form_type == "reset_overdue_follow_up":
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("DELETE FROM notice_sends WHERE notice_type IN ('overdue', 'follow_up')")
+            conn.commit()
+            conn.close()
+            flash("Overdue and Follow Up send history was reset.", "success")
+            return redirect(url_for("settings", tab="general"))
+
         if form_type == "email_templates":
             for template_key in template_keys:
                 setting_key = f"email_template_{template_key}"

@@ -422,6 +422,10 @@ button.warning {
   background: #d97706;
 }
 
+button.danger {
+  background: #b42318;
+}
+
 button.follow-up {
   background: #7c3aed;
 }

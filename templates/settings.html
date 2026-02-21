@@ -139,6 +139,13 @@
 
       <button type="submit">Save Settings</button>
     </form>
+
+    <h2>Overdue / Follow Up Reset</h2>
+    <p><small>This clears last sent tracking for overdue/follow up across all customers.</small></p>
+    <form method="post" onsubmit="return confirm('Reset overdue/follow up last sent history for all customers?');">
+      <input type="hidden" name="form_type" value="reset_overdue_follow_up" />
+      <button type="submit" class="danger">Reset Overdue Last Sent</button>
+    </form>
   </div>
 
   <div class="panel tab-panel {% if active_tab == 'templates' %}active{% endif %}" id="tab-settings-templates">
