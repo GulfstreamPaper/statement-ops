@@ -10,6 +10,7 @@ import smtplib
 import math
 import time
 import threading
+from zoneinfo import ZoneInfo
 from io import BytesIO
 
 import pandas as pd
@@ -64,6 +65,13 @@ EMAIL_TEMPLATE_DEFAULTS = {
         "Kind regards,\n"
         "Redway Group Inc"
     ),
+    "follow_up": (
+        "Good afternoon Team,\n\n"
+        "Attached please find the most recent statement of open invoices. Please update us on the status of payments for all highlighted invoices.\n\n"
+        "Let me know if you have any questions or need additional information.\n\n"
+        "Kind regards,\n"
+        "Redway Group Inc"
+    ),
     "skipped": (
         "Dear Customer,\n\n"
         "It seems that one or more invoices have been skipped with your last payment. Attached please find the copies of the invoices along with a most recent statement for the account.\n\n"
@@ -84,6 +92,8 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 
 APP_USERNAME = os.environ.get("APP_USERNAME", "").strip()
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
+BUSINESS_TZ = ZoneInfo("America/New_York")
+UTC_TZ = ZoneInfo("UTC")
 
 
 def ensure_storage():
@@ -199,7 +209,20 @@ def init_db():
             recipient_id INTEGER NOT NULL,
             notice_type TEXT NOT NULL,
             sent_at TEXT NOT NULL,
+            email_subject TEXT,
+            email_message_id TEXT,
+            thread_message_id TEXT,
             FOREIGN KEY(invoice_file_id) REFERENCES invoice_files(id),
+            FOREIGN KEY(recipient_id) REFERENCES recipients(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS notice_sent_invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipient_id INTEGER NOT NULL,
+            notice_type TEXT NOT NULL,
+            invoice_id TEXT NOT NULL,
+            sent_at TEXT NOT NULL,
+            UNIQUE(recipient_id, notice_type, invoice_id),
             FOREIGN KEY(recipient_id) REFERENCES recipients(id)
         );
 
@@ -296,10 +319,28 @@ def init_db():
         cur.execute("ALTER TABLE notice_sends ADD COLUMN invoice_file_id INTEGER")
     if "invoice_path" not in notice_cols:
         cur.execute("ALTER TABLE notice_sends ADD COLUMN invoice_path TEXT")
+    if "email_subject" not in notice_cols:
+        cur.execute("ALTER TABLE notice_sends ADD COLUMN email_subject TEXT")
+    if "email_message_id" not in notice_cols:
+        cur.execute("ALTER TABLE notice_sends ADD COLUMN email_message_id TEXT")
+    if "thread_message_id" not in notice_cols:
+        cur.execute("ALTER TABLE notice_sends ADD COLUMN thread_message_id TEXT")
 
     cur.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_notice_unique "
         "ON notice_sends(invoice_file_id, invoice_path, recipient_id, notice_type)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notice_recipient_type_sent_at "
+        "ON notice_sends(recipient_id, notice_type, sent_at)"
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_notice_sent_invoice_unique "
+        "ON notice_sent_invoices(recipient_id, notice_type, invoice_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_notice_sent_invoice_lookup "
+        "ON notice_sent_invoices(notice_type, recipient_id)"
     )
 
     cur.execute(
@@ -649,6 +690,7 @@ def get_notice_cc(notice_type):
     key_map = {
         "statement": "cc_statement",
         "overdue": "cc_overdue",
+        "follow_up": "cc_overdue",
         "skipped": "cc_skipped",
         "short_paid": "cc_short_paid",
     }
@@ -755,6 +797,64 @@ def parse_datetime(value):
         return None
 
 
+def parse_datetime_to_business(value):
+    parsed = parse_datetime(value)
+    if not parsed:
+        return None
+    return parsed.replace(tzinfo=UTC_TZ).astimezone(BUSINESS_TZ)
+
+
+def business_days_since(value):
+    business_dt = parse_datetime_to_business(value)
+    if not business_dt:
+        return None
+    today = datetime.now(BUSINESS_TZ).date()
+    return (today - business_dt.date()).days
+
+
+def is_follow_up_window_active(overdue_sent_at):
+    days = business_days_since(overdue_sent_at)
+    return days is not None and 0 <= days < 7
+
+
+def parse_notice_timestamp(value):
+    business_dt = parse_datetime_to_business(value)
+    if not business_dt:
+        return None
+    return business_dt.timestamp()
+
+
+def was_notice_sent_since(last_candidate_sent_at, baseline_sent_at):
+    candidate_ts = parse_notice_timestamp(last_candidate_sent_at)
+    baseline_ts = parse_notice_timestamp(baseline_sent_at)
+    if candidate_ts is None or baseline_ts is None:
+        return False
+    return candidate_ts >= baseline_ts
+
+
+def normalize_message_id(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if not text.startswith("<"):
+        text = f"<{text}"
+    if not text.endswith(">"):
+        text = f"{text}>"
+    return text
+
+
+def normalize_invoice_id(value):
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    try:
+        return str(int(float(text)))
+    except Exception:
+        return text
+
+
 def get_latest_overdue_run():
     conn = get_db()
     cur = conn.cursor()
@@ -803,58 +903,142 @@ def notice_run_id_required():
     return False
 
 
-def record_notice_send(run_id, invoice_file_id, invoice_path, recipient_id, notice_type):
+def record_notice_send(
+    run_id,
+    invoice_file_id,
+    invoice_path,
+    recipient_id,
+    notice_type,
+    email_subject=None,
+    email_message_id=None,
+    thread_message_id=None,
+):
     if not recipient_id:
         return
     if not invoice_file_id and invoice_path:
         invoice_file_id = resolve_invoice_file_id(invoice_path)
-    if notice_run_id_required() and not run_id:
+    run_id_required = notice_run_id_required()
+    if run_id_required and not run_id:
         run_id = resolve_run_id(None)
-    conn = get_db()
-    cur = conn.cursor()
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        if notice_run_id_required():
-            cur.execute(
-                "INSERT INTO notice_sends(run_id, invoice_file_id, invoice_path, recipient_id, notice_type, sent_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (run_id, invoice_file_id, invoice_path, recipient_id, notice_type, now),
-            )
-        else:
-            cur.execute(
-                "INSERT INTO notice_sends(invoice_file_id, invoice_path, recipient_id, notice_type, sent_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (invoice_file_id, invoice_path, recipient_id, notice_type, now),
-            )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        pass
-    except sqlite3.OperationalError:
-        conn.close()
-        init_db()
-        conn = get_db()
-        cur = conn.cursor()
+    message_id = normalize_message_id(email_message_id)
+    thread_id = normalize_message_id(thread_message_id)
+
+    def execute(cur):
         try:
-            if notice_run_id_required():
+            if run_id_required:
                 cur.execute(
-                    "INSERT INTO notice_sends(run_id, invoice_file_id, invoice_path, recipient_id, notice_type, sent_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (run_id, invoice_file_id, invoice_path, recipient_id, notice_type, now),
+                    "INSERT INTO notice_sends(run_id, invoice_file_id, invoice_path, recipient_id, notice_type, sent_at, email_subject, email_message_id, thread_message_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        run_id,
+                        invoice_file_id,
+                        invoice_path,
+                        recipient_id,
+                        notice_type,
+                        now,
+                        email_subject,
+                        message_id,
+                        thread_id,
+                    ),
                 )
             else:
                 cur.execute(
-                    "INSERT INTO notice_sends(invoice_file_id, invoice_path, recipient_id, notice_type, sent_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (invoice_file_id, invoice_path, recipient_id, notice_type, now),
+                    "INSERT INTO notice_sends(invoice_file_id, invoice_path, recipient_id, notice_type, sent_at, email_subject, email_message_id, thread_message_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        invoice_file_id,
+                        invoice_path,
+                        recipient_id,
+                        notice_type,
+                        now,
+                        email_subject,
+                        message_id,
+                        thread_id,
+                    ),
                 )
-            conn.commit()
         except sqlite3.IntegrityError:
-            pass
-        finally:
-            conn.close()
-        return
-    finally:
+            set_clause = "sent_at = ?, email_subject = ?, email_message_id = ?, thread_message_id = ?"
+            values = [now, email_subject, message_id, thread_id]
+            if run_id_required:
+                set_clause += ", run_id = ?"
+                values.append(run_id)
+            if invoice_file_id:
+                cur.execute(
+                    f"UPDATE notice_sends SET {set_clause} WHERE invoice_file_id = ? AND recipient_id = ? AND notice_type = ?",
+                    tuple(values + [invoice_file_id, recipient_id, notice_type]),
+                )
+            elif invoice_path:
+                cur.execute(
+                    f"UPDATE notice_sends SET {set_clause} WHERE invoice_path = ? AND recipient_id = ? AND notice_type = ?",
+                    tuple(values + [invoice_path, recipient_id, notice_type]),
+                )
+            else:
+                cur.execute(
+                    f"UPDATE notice_sends SET {set_clause} WHERE recipient_id = ? AND notice_type = ?",
+                    tuple(values + [recipient_id, notice_type]),
+                )
+
+    def run_once():
+        conn = get_db()
+        cur = conn.cursor()
+        execute(cur)
+        conn.commit()
         conn.close()
+
+    try:
+        run_once()
+    except sqlite3.OperationalError:
+        init_db()
+        try:
+            run_once()
+        except Exception:
+            return
+
+
+def get_latest_notice_send(recipient_id, notice_type):
+    if not recipient_id:
+        return None
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT * FROM notice_sends WHERE recipient_id = ? AND notice_type = ? ORDER BY sent_at DESC LIMIT 1",
+            (recipient_id, notice_type),
+        )
+        row = cur.fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_notice_thread_context(recipient_id):
+    latest_overdue = get_latest_notice_send(recipient_id, "overdue")
+    if not latest_overdue:
+        return None
+
+    sent_dt = parse_datetime_to_business(latest_overdue.get("sent_at"))
+    sent_date = sent_dt.date() if sent_dt else datetime.now(BUSINESS_TZ).date()
+    base_subject = latest_overdue.get("email_subject") or build_overdue_subject(sent_date)
+    thread_message_id = normalize_message_id(
+        latest_overdue.get("thread_message_id") or latest_overdue.get("email_message_id")
+    )
+
+    return {
+        "base_subject": base_subject,
+        "thread_message_id": thread_message_id,
+        "sent_at": latest_overdue.get("sent_at"),
+    }
+
+
+def was_follow_up_sent_since_overdue(last_overdue_sent_at, last_follow_up_sent_at):
+    return was_notice_sent_since(last_follow_up_sent_at, last_overdue_sent_at)
+
+
+def should_show_follow_up(last_overdue_sent_at):
+    return is_follow_up_window_active(last_overdue_sent_at)
 
 
 def get_notice_sends(invoice_file_id, invoice_path):
@@ -878,6 +1062,84 @@ def get_notice_sends(invoice_file_id, invoice_path):
         rows = []
     conn.close()
     return {(row["recipient_id"], row["notice_type"]) for row in rows}
+
+
+def record_notice_invoice_ids(recipient_id, notice_type, invoice_ids):
+    if not recipient_id or notice_type not in {"skipped", "short_paid"}:
+        return
+    normalized_ids = []
+    for invoice_id in invoice_ids or []:
+        clean_id = normalize_invoice_id(invoice_id)
+        if clean_id:
+            normalized_ids.append(clean_id)
+    if not normalized_ids:
+        return
+    unique_ids = sorted(set(normalized_ids))
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_db()
+    cur = conn.cursor()
+    cur.executemany(
+        "INSERT OR IGNORE INTO notice_sent_invoices(recipient_id, notice_type, invoice_id, sent_at) VALUES (?, ?, ?, ?)",
+        [(recipient_id, notice_type, invoice_id, now) for invoice_id in unique_ids],
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_sent_notice_invoice_ids_map(notice_type):
+    mapping = {}
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT recipient_id, invoice_id FROM notice_sent_invoices WHERE notice_type = ?",
+            (notice_type,),
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    for row in rows:
+        recipient_id = int(row["recipient_id"])
+        invoice_id = normalize_invoice_id(row["invoice_id"])
+        if not invoice_id:
+            continue
+        mapping.setdefault(recipient_id, set()).add(invoice_id)
+    return mapping
+
+
+def get_last_notice_sent_map(notice_type):
+    mapping = {}
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT recipient_id, MAX(sent_at) AS last_sent_at FROM notice_sends WHERE notice_type = ? GROUP BY recipient_id",
+            (notice_type,),
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    for row in rows:
+        mapping[int(row["recipient_id"])] = row["last_sent_at"]
+    return mapping
+
+
+def format_notice_relative_status(sent_at_value):
+    if not sent_at_value:
+        return "Not Sent"
+    business_dt = parse_datetime_to_business(sent_at_value)
+    if not business_dt:
+        return "Not Sent"
+    sent_date = business_dt.date()
+    today = datetime.now(BUSINESS_TZ).date()
+    days = (today - sent_date).days
+    if days <= 0:
+        return "Sent Today"
+    if days == 1:
+        return "Sent Yesterday"
+    return f"Sent {days} Days Ago"
 
 
 def resolve_run_id(run_id):
@@ -2205,7 +2467,30 @@ def generate_invoice_pdf(customer_data, output_path, terms_code):
 
 # --- Email ---
 
-def send_email(to_emails, subject, body, attachment_path=None, cc_emails=None, extra_attachments=None):
+def build_overdue_subject(sent_date=None):
+    date_value = sent_date or datetime.now(BUSINESS_TZ).date()
+    return f"Overdue Notice {date_value.strftime('%m/%d/%Y')}"
+
+
+def build_follow_up_subject(base_subject):
+    clean_subject = str(base_subject or "").strip()
+    if not clean_subject:
+        clean_subject = build_overdue_subject()
+    if clean_subject.lower().startswith("re:"):
+        return clean_subject
+    return f"Re: {clean_subject}"
+
+
+def send_email(
+    to_emails,
+    subject,
+    body,
+    attachment_path=None,
+    cc_emails=None,
+    extra_attachments=None,
+    in_reply_to=None,
+    references=None,
+):
     to_emails = normalize_email_value(to_emails)
     if not to_emails:
         raise RuntimeError("Missing recipient email")
@@ -2244,6 +2529,14 @@ def send_email(to_emails, subject, body, attachment_path=None, cc_emails=None, e
     if cc_emails:
         msg["Cc"] = cc_emails
     msg["Subject"] = subject
+    message_id = make_msgid()
+    msg["Message-ID"] = message_id
+    in_reply_to_value = normalize_message_id(in_reply_to)
+    references_value = normalize_message_id(references)
+    if in_reply_to_value:
+        msg["In-Reply-To"] = in_reply_to_value
+    if references_value:
+        msg["References"] = references_value
     msg.set_content(plain_body)
     msg.add_alternative(html_body, subtype="html")
 
@@ -2296,6 +2589,8 @@ def send_email(to_emails, subject, body, attachment_path=None, cc_emails=None, e
         if username and password:
             server.login(username, password)
         server.send_message(msg)
+
+    return message_id
 
 
 # --- Scheduling helpers ---
@@ -3105,10 +3400,11 @@ def overdue_report():
 
     rows = get_overdue_items(run["id"]) if run and run["status"] == "success" else []
     rows = [dict(row) for row in rows]
-    invoice_file_id = run["invoice_file_id"] if run else None
-    invoice_path = run["invoice_path"] if run else None
-    sent_map = get_notice_sends(invoice_file_id, invoice_path) if run else set()
     recipients_map = get_recipients_terms_map()
+    skipped_sent_map = get_sent_notice_invoice_ids_map("skipped") if run else {}
+    short_paid_sent_map = get_sent_notice_invoice_ids_map("short_paid") if run else {}
+    last_overdue_sent_map = get_last_notice_sent_map("overdue") if run else {}
+    last_follow_up_sent_map = get_last_notice_sent_map("follow_up") if run else {}
     for row in rows:
         recipient = recipients_map.get(row["group_name"])
         row["recipient_id"] = recipient["id"] if recipient else None
@@ -3127,9 +3423,32 @@ def overdue_report():
         except Exception:
             row["short_paid_invoices"] = []
         recipient_id = row["recipient_id"]
-        row["sent_overdue"] = (recipient_id, "overdue") in sent_map if recipient_id else False
-        row["sent_skipped"] = (recipient_id, "skipped") in sent_map if recipient_id else False
-        row["sent_short_paid"] = (recipient_id, "short_paid") in sent_map if recipient_id else False
+        skipped_invoice_ids = {
+            normalize_invoice_id(item.get("order_id"))
+            for item in row["skipped_invoices"]
+            if normalize_invoice_id(item.get("order_id"))
+        }
+        short_paid_invoice_ids = {
+            normalize_invoice_id(item.get("order_id"))
+            for item in row["short_paid_invoices"]
+            if normalize_invoice_id(item.get("order_id"))
+        }
+        sent_skipped_ids = skipped_sent_map.get(recipient_id, set()) if recipient_id else set()
+        sent_short_paid_ids = short_paid_sent_map.get(recipient_id, set()) if recipient_id else set()
+        row["sent_skipped"] = bool(skipped_invoice_ids) and skipped_invoice_ids.issubset(sent_skipped_ids)
+        row["sent_short_paid"] = bool(short_paid_invoice_ids) and short_paid_invoice_ids.issubset(sent_short_paid_ids)
+        if recipient_id:
+            last_overdue_sent_at = last_overdue_sent_map.get(recipient_id)
+            row["last_overdue_notice"] = format_notice_relative_status(last_overdue_sent_at)
+            row["follow_up_active"] = should_show_follow_up(last_overdue_sent_at)
+            row["sent_follow_up"] = was_follow_up_sent_since_overdue(
+                last_overdue_sent_at,
+                last_follow_up_sent_map.get(recipient_id),
+            )
+        else:
+            row["last_overdue_notice"] = "Not Sent"
+            row["follow_up_active"] = False
+            row["sent_follow_up"] = False
 
     total_overdue_count = sum(row["overdue_count"] for row in rows)
     total_overdue_amount = sum(row["overdue_amount"] for row in rows)
@@ -3171,7 +3490,7 @@ def overdue_report_export():
     if not run or run["status"] != "success":
         return "No overdue report available to export.", 400
 
-    rows = get_overdue_items(run["id"])
+    rows = [dict(row) for row in get_overdue_items(run["id"])]
     if not rows:
         return "No overdue data to export.", 400
 
@@ -3185,8 +3504,9 @@ def overdue_report_export():
                 "Overdue Invoices": int(row["overdue_count"]),
                 "Oldest Overdue Days": int(row["days_overdue"]),
                 "Overdue Amount": float(row["overdue_amount"]),
-                "Short Paid Invoices": int(row.get("short_paid_count", 0)),
-                "Short Paid Amount": float(row.get("short_paid_amount", 0.0)),
+                "Short Paid Invoices": int(row.get("short_paid_count") or 0),
+                "Short Paid Amount": float(row.get("short_paid_amount") or 0.0),
+                "Skipped Invoices": int(row.get("skipped_count") or 0),
             }
         )
 
@@ -3233,13 +3553,92 @@ def overdue_report_send(recipient_id):
         recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
         output_path = build_statement_pdf(recipient, invoice_path)
-        subject = f"Overdue Notice {date.today().strftime('%m/%d/%Y')}"
-        body = get_email_template_body("overdue")
-        send_email(recipient["email_to"], subject, body, output_path, cc_emails=get_notice_cc("overdue"))
-        record_notice_send(run_id, invoice_file_id, invoice_path, recipient_id, "overdue")
+        subject = build_overdue_subject()
+        body = get_email_template_body("follow_up")
+        message_id = send_email(
+            recipient["email_to"],
+            subject,
+            body,
+            output_path,
+            cc_emails=get_notice_cc("overdue"),
+        )
+        record_notice_send(
+            run_id,
+            invoice_file_id,
+            invoice_path,
+            recipient_id,
+            "overdue",
+            email_subject=subject,
+            email_message_id=message_id,
+            thread_message_id=message_id,
+        )
         flash(f"Overdue notice sent to {recipient['group_name']}.", "success")
     except Exception as exc:
         flash(f"Overdue notice failed: {exc}", "error")
+
+    return redirect(url_for("overdue_report"))
+
+
+@app.route("/overdue-report/follow-up/<int:recipient_id>", methods=["POST"])
+def overdue_report_follow_up(recipient_id):
+    run_id = resolve_run_id(request.form.get("run_id"))
+    invoice_path = None
+    invoice_file_id = None
+    if run_id:
+        run = get_overdue_run(int(run_id))
+        if run and run["invoice_path"]:
+            invoice_path = run["invoice_path"]
+        if run:
+            invoice_file_id = run["invoice_file_id"]
+
+    try:
+        if not invoice_path:
+            _, invoice_path = get_invoice_for_run()
+
+        conn = get_db()
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM recipients WHERE id = ?", (recipient_id,))
+        recipient = cur.fetchone()
+        conn.close()
+        if not recipient:
+            flash("Recipient not found", "error")
+            return redirect(url_for("overdue_report"))
+        recipient = dict(recipient)
+        recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
+
+        thread_context = get_notice_thread_context(recipient_id)
+        if not thread_context:
+            flash("Send an overdue notice first, then use follow up.", "error")
+            return redirect(url_for("overdue_report"))
+        if not should_show_follow_up(thread_context.get("sent_at")):
+            flash("Follow up is available for 7 days after the last overdue notice.", "error")
+            return redirect(url_for("overdue_report"))
+
+        output_path = build_statement_pdf(recipient, invoice_path)
+        subject = build_follow_up_subject(thread_context["base_subject"])
+        body = get_email_template_body("overdue")
+        message_id = send_email(
+            recipient["email_to"],
+            subject,
+            body,
+            output_path,
+            cc_emails=get_notice_cc("follow_up"),
+            in_reply_to=thread_context["thread_message_id"],
+            references=thread_context["thread_message_id"],
+        )
+        record_notice_send(
+            run_id,
+            invoice_file_id,
+            invoice_path,
+            recipient_id,
+            "follow_up",
+            email_subject=subject,
+            email_message_id=message_id,
+            thread_message_id=thread_context["thread_message_id"] or message_id,
+        )
+        flash(f"Follow up sent to {recipient['group_name']}.", "success")
+    except Exception as exc:
+        flash(f"Follow up failed: {exc}", "error")
 
     return redirect(url_for("overdue_report"))
 
@@ -3302,7 +3701,7 @@ def overdue_report_skipped(recipient_id):
         statement_path = build_statement_pdf(recipient, invoice_path)
         subject = f"Skipped Invoice Notifcation {date.today().strftime('%m/%d/%Y')}"
         body = get_email_template_body("skipped")
-        send_email(
+        message_id = send_email(
             recipient["email_to"],
             subject,
             body,
@@ -3310,7 +3709,16 @@ def overdue_report_skipped(recipient_id):
             cc_emails=get_notice_cc("skipped"),
             extra_attachments=attachments,
         )
-        record_notice_send(run_id, invoice_file_id, invoice_path, recipient_id, "skipped")
+        record_notice_send(
+            run_id,
+            invoice_file_id,
+            invoice_path,
+            recipient_id,
+            "skipped",
+            email_subject=subject,
+            email_message_id=message_id,
+        )
+        record_notice_invoice_ids(recipient_id, "skipped", invoice_ids)
         flash(f"Skipped notice sent to {recipient['group_name']}.", "success")
     except Exception as exc:
         flash(f"Skipped notice failed: {exc}", "error")
@@ -3376,7 +3784,7 @@ def overdue_report_short_paid(recipient_id):
         statement_path = build_statement_pdf(recipient, invoice_path)
         subject = f"Partial Payment Notification {date.today().strftime('%m/%d/%Y')}"
         body = get_email_template_body("short_paid")
-        send_email(
+        message_id = send_email(
             recipient["email_to"],
             subject,
             body,
@@ -3384,7 +3792,16 @@ def overdue_report_short_paid(recipient_id):
             cc_emails=get_notice_cc("short_paid"),
             extra_attachments=attachments,
         )
-        record_notice_send(run_id, invoice_file_id, invoice_path, recipient_id, "short_paid")
+        record_notice_send(
+            run_id,
+            invoice_file_id,
+            invoice_path,
+            recipient_id,
+            "short_paid",
+            email_subject=subject,
+            email_message_id=message_id,
+        )
+        record_notice_invoice_ids(recipient_id, "short_paid", invoice_ids)
         flash(f"Short paid notice sent to {recipient['group_name']}.", "success")
     except Exception as exc:
         flash(f"Short paid notice failed: {exc}", "error")
@@ -3627,6 +4044,7 @@ def customers():
             cur.execute("DELETE FROM group_members WHERE customer_id = ?", (source_id,))
             cur.execute("UPDATE statement_runs SET recipient_id = ? WHERE recipient_id = ?", (target_id, source_id))
             cur.execute("UPDATE notice_sends SET recipient_id = ? WHERE recipient_id = ?", (target_id, source_id))
+            cur.execute("UPDATE notice_sent_invoices SET recipient_id = ? WHERE recipient_id = ?", (target_id, source_id))
             cur.execute("UPDATE customer_mappings SET recipient_id = ? WHERE recipient_id = ?", (target_id, source_id))
             cur.execute("DELETE FROM recipients WHERE id = ?", (source_id,))
 
@@ -3840,6 +4258,7 @@ def delete_customer(recipient_id):
     cur = conn.cursor()
     cur.execute("DELETE FROM group_members WHERE group_id = ? OR customer_id = ?", (recipient_id, recipient_id))
     cur.execute("DELETE FROM customer_aliases WHERE recipient_id = ?", (recipient_id,))
+    cur.execute("DELETE FROM notice_sent_invoices WHERE recipient_id = ?", (recipient_id,))
     cur.execute("DELETE FROM recipients WHERE id = ?", (recipient_id,))
     conn.commit()
     conn.close()
@@ -3986,7 +4405,7 @@ def send_download():
 
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
-    template_keys = ["statement", "overdue", "skipped", "short_paid"]
+    template_keys = ["statement", "overdue", "follow_up", "skipped", "short_paid"]
     allowed_tabs = {"general", "templates"}
     if request.method == "POST":
         form_type = request.form.get("form_type", "general")

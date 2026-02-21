@@ -46,6 +46,7 @@
           <th class="sortable" data-sort-key="short_paid_count">Short Paid</th>
           <th class="sortable" data-sort-key="short_paid_amount">Short Paid Amount</th>
           <th class="sortable" data-sort-key="skipped_count">Skipped</th>
+          <th>Last Overdue Notice</th>
           <th>Actions</th>
         </tr>
       </thead>
@@ -60,15 +61,24 @@
             <td>{{ row['short_paid_count'] or 0 }}</td>
             <td>${{ "{:,.2f}".format(row['short_paid_amount'] or 0) }}</td>
             <td>{{ row['skipped_count'] }}</td>
+            <td>{{ row['last_overdue_notice'] }}</td>
             <td class="actions">
               {% if row['recipient_id'] %}
                 <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=row['recipient_id']) }}">Download</a>
                 {% if row['overdue_count'] > 0 %}
-                  <form method="post" action="{{ url_for('overdue_report_send', recipient_id=row['recipient_id']) }}" class="overdue-form" data-recipient-id="{{ row['recipient_id'] }}" data-has-email="{{ '1' if row['has_email'] else '0' }}" data-group-name="{{ row['group_name'] }}">
-                    <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
-                    <input type="hidden" name="email_to" class="email-override-input" value="" />
-                    <button type="submit" class="warning {% if row['sent_overdue'] %}sent{% endif %}">Overdue</button>
-                  </form>
+                  {% if row['follow_up_active'] %}
+                    <form method="post" action="{{ url_for('overdue_report_follow_up', recipient_id=row['recipient_id']) }}" class="overdue-form" data-recipient-id="{{ row['recipient_id'] }}" data-has-email="{{ '1' if row['has_email'] else '0' }}" data-group-name="{{ row['group_name'] }}">
+                      <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
+                      <input type="hidden" name="email_to" class="email-override-input" value="" />
+                      <button type="submit" class="follow-up {% if row['sent_follow_up'] %}sent{% endif %}">Follow Up</button>
+                    </form>
+                  {% else %}
+                    <form method="post" action="{{ url_for('overdue_report_send', recipient_id=row['recipient_id']) }}" class="overdue-form" data-recipient-id="{{ row['recipient_id'] }}" data-has-email="{{ '1' if row['has_email'] else '0' }}" data-group-name="{{ row['group_name'] }}">
+                      <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
+                      <input type="hidden" name="email_to" class="email-override-input" value="" />
+                      <button type="submit" class="warning">Overdue</button>
+                    </form>
+                  {% endif %}
                 {% endif %}
                 {% if row['skipped_count'] > 0 %}
                   <button type="button" class="skipped skipped-btn {% if row['sent_skipped'] %}sent{% endif %}"
@@ -96,7 +106,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="9">No overdue, skipped, or short-paid groups found.</td></tr>
+          <tr><td colspan="10">No overdue, skipped, or short-paid groups found.</td></tr>
         {% endfor %}
       </tbody>
       <tfoot>
@@ -107,6 +117,7 @@
           <th>${{ "{:,.2f}".format(total_overdue_amount) }}</th>
           <th>{{ total_short_paid_count }}</th>
           <th>${{ "{:,.2f}".format(total_short_paid_amount) }}</th>
+          <th></th>
           <th></th>
           <th></th>
         </tr>

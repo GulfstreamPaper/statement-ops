@@ -422,6 +422,10 @@ button.warning {
   background: #d97706;
 }
 
+button.follow-up {
+  background: #7c3aed;
+}
+
 button.skipped {
   background: #fff3bf;
   color: #6b5b00;
