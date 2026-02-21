@@ -3554,7 +3554,7 @@ def overdue_report_send(recipient_id):
 
         output_path = build_statement_pdf(recipient, invoice_path)
         subject = build_overdue_subject()
-        body = get_email_template_body("follow_up")
+        body = get_email_template_body("overdue")
         message_id = send_email(
             recipient["email_to"],
             subject,
@@ -3616,7 +3616,7 @@ def overdue_report_follow_up(recipient_id):
 
         output_path = build_statement_pdf(recipient, invoice_path)
         subject = build_follow_up_subject(thread_context["base_subject"])
-        body = get_email_template_body("overdue")
+        body = get_email_template_body("follow_up")
         message_id = send_email(
             recipient["email_to"],
             subject,
