@@ -372,6 +372,27 @@ main {
   font-size: 12px;
 }
 
+.due-today-list {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.due-today-extra {
+  margin-top: 0;
+}
+
+.due-today-footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.due-toggle-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
 form .row {
   display: grid;
   gap: 12px;

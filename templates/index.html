@@ -16,11 +16,26 @@
     <div>
       <h2>Due Today</h2>
       {% if due %}
-        <ul>
-          {% for r in due %}
+        {% set due_total = due|length %}
+        {% set due_visible = due[:15] %}
+        <ul class="due-today-list">
+          {% for r in due_visible %}
             <li>{{ r['group_name'] }} <span class="badge">{{ r['frequency'] }}</span></li>
           {% endfor %}
         </ul>
+        {% if due_total > 15 %}
+          <ul class="due-today-list due-today-extra" id="dueTodayExtra" hidden>
+            {% for r in due[15:] %}
+              <li>{{ r['group_name'] }} <span class="badge">{{ r['frequency'] }}</span></li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+        <div class="due-today-footer">
+          <small id="dueTodayCount">Showing {{ due_visible|length }} out {{ due_total }}</small>
+          {% if due_total > 15 %}
+            <button type="button" class="secondary due-toggle-btn" id="dueTodayToggle" aria-expanded="false">Show All</button>
+          {% endif %}
+        </div>
       {% else %}
         <p><small>No statements due today.</small></p>
       {% endif %}
@@ -237,5 +252,27 @@
         termsModalList.innerHTML = '';
       }
     });
+
+    const dueTodayToggle = document.getElementById('dueTodayToggle');
+    const dueTodayExtra = document.getElementById('dueTodayExtra');
+    const dueTodayCount = document.getElementById('dueTodayCount');
+
+    if (dueTodayToggle && dueTodayExtra && dueTodayCount) {
+      const dueTotal = {{ due|length }};
+      dueTodayToggle.addEventListener('click', () => {
+        const expanded = dueTodayToggle.getAttribute('aria-expanded') === 'true';
+        if (expanded) {
+          dueTodayExtra.hidden = true;
+          dueTodayToggle.setAttribute('aria-expanded', 'false');
+          dueTodayToggle.textContent = 'Show All';
+          dueTodayCount.textContent = `Showing 15 out ${dueTotal}`;
+        } else {
+          dueTodayExtra.hidden = false;
+          dueTodayToggle.setAttribute('aria-expanded', 'true');
+          dueTodayToggle.textContent = 'Hide';
+          dueTodayCount.textContent = `Showing ${dueTotal} out ${dueTotal}`;
+        }
+      });
+    }
   </script>
 {% endblock %}
