@@ -104,6 +104,9 @@ APP_USERNAME = os.environ.get("APP_USERNAME", "").strip()
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
 BUSINESS_TZ = ZoneInfo("America/New_York")
 UTC_TZ = ZoneInfo("UTC")
+DASHBOARD_CACHE_KEY = "dashboard_main"
+DASHBOARD_CACHE_VERSION = 1
+DASHBOARD_CACHE_LOCK = threading.Lock()
 
 
 def ensure_storage():
@@ -291,6 +294,18 @@ def init_db():
             FOREIGN KEY(job_id) REFERENCES scheduled_jobs(id),
             FOREIGN KEY(recipient_id) REFERENCES recipients(id)
         );
+
+        CREATE TABLE IF NOT EXISTS dashboard_cache (
+            cache_key TEXT PRIMARY KEY,
+            business_date TEXT NOT NULL,
+            invoice_file_id INTEGER,
+            invoice_path TEXT,
+            invoice_mtime REAL,
+            invoice_size INTEGER,
+            cache_version INTEGER DEFAULT 1,
+            payload_json TEXT NOT NULL,
+            computed_at TEXT NOT NULL
+        );
         """
     )
     cur.execute("PRAGMA table_info(recipients)")
@@ -396,6 +411,15 @@ def init_db():
     if scheduled_cols and "requested_by" not in scheduled_cols:
         cur.execute("ALTER TABLE scheduled_jobs ADD COLUMN requested_by TEXT")
 
+    cur.execute("PRAGMA table_info(dashboard_cache)")
+    dashboard_cols = [row[1] for row in cur.fetchall()]
+    if dashboard_cols and "invoice_mtime" not in dashboard_cols:
+        cur.execute("ALTER TABLE dashboard_cache ADD COLUMN invoice_mtime REAL")
+    if dashboard_cols and "invoice_size" not in dashboard_cols:
+        cur.execute("ALTER TABLE dashboard_cache ADD COLUMN invoice_size INTEGER")
+    if dashboard_cols and "cache_version" not in dashboard_cols:
+        cur.execute("ALTER TABLE dashboard_cache ADD COLUMN cache_version INTEGER DEFAULT 1")
+
     conn.commit()
     conn.close()
 
@@ -421,6 +445,115 @@ def set_setting(key, value):
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         (key, value),
     )
+    conn.commit()
+    conn.close()
+
+
+def get_business_date():
+    return datetime.now(BUSINESS_TZ).date()
+
+
+def get_business_date_str():
+    return get_business_date().isoformat()
+
+
+def get_dashboard_invoice_signature():
+    try:
+        invoice_file_id, invoice_path = get_invoice_for_run()
+    except Exception as exc:
+        return {
+            "invoice_file_id": None,
+            "invoice_path": None,
+            "invoice_mtime": None,
+            "invoice_size": None,
+            "error": str(exc),
+        }
+
+    invoice_mtime = None
+    invoice_size = None
+    if invoice_path and os.path.exists(invoice_path):
+        try:
+            stat_result = os.stat(invoice_path)
+            invoice_mtime = float(stat_result.st_mtime)
+            invoice_size = int(stat_result.st_size)
+        except Exception:
+            invoice_mtime = None
+            invoice_size = None
+
+    return {
+        "invoice_file_id": invoice_file_id,
+        "invoice_path": invoice_path,
+        "invoice_mtime": invoice_mtime,
+        "invoice_size": invoice_size,
+        "error": None,
+    }
+
+
+def get_dashboard_cache_row():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM dashboard_cache WHERE cache_key = ?", (DASHBOARD_CACHE_KEY,))
+    row = cur.fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def cache_row_matches_signature(cache_row, signature):
+    if not cache_row:
+        return False
+    return (
+        cache_row.get("business_date") == get_business_date_str()
+        and int(cache_row.get("cache_version") or 0) == DASHBOARD_CACHE_VERSION
+        and cache_row.get("invoice_file_id") == signature.get("invoice_file_id")
+        and (cache_row.get("invoice_path") or "") == (signature.get("invoice_path") or "")
+        and cache_row.get("invoice_mtime") == signature.get("invoice_mtime")
+        and cache_row.get("invoice_size") == signature.get("invoice_size")
+    )
+
+
+def load_cached_dashboard_payload(cache_row):
+    if not cache_row:
+        return None
+    try:
+        payload = json.loads(cache_row["payload_json"])
+        payload["dashboard_cached_at"] = cache_row.get("computed_at")
+        return payload
+    except Exception:
+        return None
+
+
+def save_dashboard_cache(signature, payload):
+    conn = get_db()
+    cur = conn.cursor()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    payload_to_store = dict(payload)
+    payload_to_store.pop("dashboard_cached_at", None)
+    cur.execute(
+        "INSERT INTO dashboard_cache(cache_key, business_date, invoice_file_id, invoice_path, invoice_mtime, invoice_size, cache_version, payload_json, computed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(cache_key) DO UPDATE SET business_date = excluded.business_date, invoice_file_id = excluded.invoice_file_id, "
+        "invoice_path = excluded.invoice_path, invoice_mtime = excluded.invoice_mtime, invoice_size = excluded.invoice_size, "
+        "cache_version = excluded.cache_version, payload_json = excluded.payload_json, computed_at = excluded.computed_at",
+        (
+            DASHBOARD_CACHE_KEY,
+            get_business_date_str(),
+            signature.get("invoice_file_id"),
+            signature.get("invoice_path"),
+            signature.get("invoice_mtime"),
+            signature.get("invoice_size"),
+            DASHBOARD_CACHE_VERSION,
+            json.dumps(payload_to_store),
+            now,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def invalidate_dashboard_cache():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM dashboard_cache WHERE cache_key = ?", (DASHBOARD_CACHE_KEY,))
     conn.commit()
     conn.close()
 
@@ -1927,7 +2060,7 @@ def build_treemap_chart(segments):
     return {"has_data": True, "tiles": tiles, "legend": legend, "total": total}
 
 
-def compute_dashboard_financials():
+def compute_dashboard_financials(invoice_file_id=None, invoice_path=None, df=None):
     result = {
         "total_receivable": 0.0,
         "overdue_no_autopay_amount": 0.0,
@@ -1937,12 +2070,19 @@ def compute_dashboard_financials():
         "invoice_label": None,
         "error": None,
     }
-    try:
-        invoice_file_id, invoice_path = get_invoice_for_run()
-        df = load_invoice_df(invoice_path)
-    except Exception as exc:
-        result["error"] = str(exc)
-        return result
+    if not invoice_path:
+        try:
+            invoice_file_id, invoice_path = get_invoice_for_run()
+        except Exception as exc:
+            result["error"] = str(exc)
+            return result
+
+    if df is None:
+        try:
+            df = load_invoice_df(invoice_path)
+        except Exception as exc:
+            result["error"] = str(exc)
+            return result
 
     if invoice_file_id:
         conn = get_db()
@@ -1991,7 +2131,7 @@ def compute_dashboard_financials():
             }
         )
 
-    today = date.today()
+    today = get_business_date()
     overdue_no_autopay_amount = 0.0
     overdue_ach_amount = 0.0
     overdue_cc_amount = 0.0
@@ -2046,7 +2186,7 @@ def compute_dashboard_financials():
     return result
 
 
-def compute_overdue_terms_breakdown(invoice_path, autopay_filter="none"):
+def compute_overdue_terms_breakdown(invoice_path, autopay_filter="none", df=None):
     customer_lookup, excluded_customer_keys = get_dashboard_customer_lookup(include_excluded=True)
     filter_code = normalize_autopay_filter(autopay_filter, "none")
     if filter_code == "all":
@@ -2054,8 +2194,9 @@ def compute_overdue_terms_breakdown(invoice_path, autopay_filter="none"):
     elif filter_code == "none":
         filter_code = ""
     custom_print_ids = get_custom_print_invoice_ids()
-    df = load_invoice_df(invoice_path)
-    today = date.today()
+    if df is None:
+        df = load_invoice_df(invoice_path)
+    today = get_business_date()
 
     customers = {}
     for _, row in df.iterrows():
@@ -2135,12 +2276,180 @@ def compute_overdue_terms_breakdown(invoice_path, autopay_filter="none"):
     return totals, customers_out
 
 
+def get_term_color_map():
+    return {
+        "net_7": "#1f77b4",
+        "net_15": "#ff7f0e",
+        "net_20": "#2ca02c",
+        "net_30": "#d62728",
+        "net_45": "#9467bd",
+        "cod": "#8c564b",
+        "bill_to_bill": "#e377c2",
+        "month_to_month": "#7f7f7f",
+        "week_to_week": "#bcbd22",
+    }
+
+
+def build_overdue_terms_chart_from_totals(totals, term_color_map):
+    segments = []
+    for code, amount in sorted(totals.items(), key=lambda item: item[1], reverse=True):
+        if amount <= 0:
+            continue
+        segments.append(
+            (
+                code,
+                TERM_CODE_TO_LABEL.get(code, code),
+                float(amount),
+                term_color_map.get(code, "#17becf"),
+            )
+        )
+    return build_svg_pie_chart(segments)
+
+
+def build_dashboard_payload(signature):
+    invoice_file_id = signature.get("invoice_file_id")
+    invoice_path = signature.get("invoice_path")
+
+    source_df = None
+    if not signature.get("error") and invoice_path:
+        try:
+            source_df = load_invoice_df(invoice_path)
+        except Exception as exc:
+            signature = dict(signature)
+            signature["error"] = str(exc)
+
+    if signature.get("error"):
+        financials = {
+            "total_receivable": 0.0,
+            "overdue_no_autopay_amount": 0.0,
+            "overdue_ach_amount": 0.0,
+            "overdue_cc_amount": 0.0,
+            "current_amount": 0.0,
+            "invoice_label": os.path.basename(invoice_path) if invoice_path else None,
+            "error": signature["error"],
+        }
+    else:
+        financials = compute_dashboard_financials(
+            invoice_file_id=invoice_file_id,
+            invoice_path=invoice_path,
+            df=source_df,
+        )
+
+    overdue_chart = build_pie_chart(
+        [
+            ("Current", financials["current_amount"], "#2d8a4e"),
+            ("Overdue (No Autopay)", financials["overdue_no_autopay_amount"], "#d14f4f"),
+            ("ACH Overdue", financials["overdue_ach_amount"], "#2f6fab"),
+            ("CC Overdue", financials["overdue_cc_amount"], "#7f3fbf"),
+        ]
+    )
+
+    term_color_map = get_term_color_map()
+    overdue_terms_non_autopay_totals = {}
+    overdue_terms_non_autopay_customers = {}
+    overdue_terms_ach_totals = {}
+    overdue_terms_ach_customers = {}
+    overdue_terms_cc_totals = {}
+    overdue_terms_cc_customers = {}
+
+    if not financials["error"] and invoice_path and source_df is not None:
+        try:
+            (
+                overdue_terms_non_autopay_totals,
+                overdue_terms_non_autopay_customers,
+            ) = compute_overdue_terms_breakdown(invoice_path, autopay_filter="none", df=source_df)
+            overdue_terms_ach_totals, overdue_terms_ach_customers = compute_overdue_terms_breakdown(
+                invoice_path, autopay_filter="ach", df=source_df
+            )
+            overdue_terms_cc_totals, overdue_terms_cc_customers = compute_overdue_terms_breakdown(
+                invoice_path, autopay_filter="cc", df=source_df
+            )
+        except Exception:
+            overdue_terms_non_autopay_totals = {}
+            overdue_terms_non_autopay_customers = {}
+            overdue_terms_ach_totals = {}
+            overdue_terms_ach_customers = {}
+            overdue_terms_cc_totals = {}
+            overdue_terms_cc_customers = {}
+
+    overdue_terms_non_autopay_chart = build_overdue_terms_chart_from_totals(
+        overdue_terms_non_autopay_totals, term_color_map
+    )
+    overdue_terms_ach_chart = build_overdue_terms_chart_from_totals(overdue_terms_ach_totals, term_color_map)
+    overdue_terms_cc_chart = build_overdue_terms_chart_from_totals(overdue_terms_cc_totals, term_color_map)
+
+    terms_counts, terms_customers = get_terms_distribution(include_customers=True)
+    terms_segments = []
+    known_codes = [code for code, _ in TERM_OPTIONS]
+    for code in known_codes:
+        count = terms_counts.get(code, 0)
+        if count > 0:
+            terms_segments.append(
+                (
+                    code,
+                    TERM_CODE_TO_LABEL.get(code, code),
+                    float(count),
+                    term_color_map.get(code, "#17becf"),
+                )
+            )
+    for code, count in terms_counts.items():
+        if code in known_codes or count <= 0:
+            continue
+        terms_segments.append((code, TERM_CODE_TO_LABEL.get(code, code), float(count), "#17becf"))
+    terms_chart = build_treemap_chart(terms_segments)
+
+    return {
+        "total_receivable": financials["total_receivable"],
+        "total_overdue_amount": (
+            financials["overdue_no_autopay_amount"]
+            + financials["overdue_ach_amount"]
+            + financials["overdue_cc_amount"]
+        ),
+        "total_overdue_no_autopay_amount": financials["overdue_no_autopay_amount"],
+        "total_overdue_ach_amount": financials["overdue_ach_amount"],
+        "total_overdue_cc_amount": financials["overdue_cc_amount"],
+        "total_current_amount": financials["current_amount"],
+        "dashboard_invoice_label": financials["invoice_label"],
+        "dashboard_error": financials["error"],
+        "overdue_chart": overdue_chart,
+        "overdue_terms_non_autopay_chart": overdue_terms_non_autopay_chart,
+        "overdue_terms_non_autopay_customers": overdue_terms_non_autopay_customers,
+        "overdue_terms_ach_chart": overdue_terms_ach_chart,
+        "overdue_terms_ach_customers": overdue_terms_ach_customers,
+        "overdue_terms_cc_chart": overdue_terms_cc_chart,
+        "overdue_terms_cc_customers": overdue_terms_cc_customers,
+        "terms_chart": terms_chart,
+        "terms_customers": terms_customers,
+    }
+
+
+def get_cached_dashboard_payload():
+    signature = get_dashboard_invoice_signature()
+    cache_row = get_dashboard_cache_row()
+    if cache_row_matches_signature(cache_row, signature):
+        payload = load_cached_dashboard_payload(cache_row)
+        if payload is not None:
+            return payload
+
+    with DASHBOARD_CACHE_LOCK:
+        cache_row = get_dashboard_cache_row()
+        if cache_row_matches_signature(cache_row, signature):
+            payload = load_cached_dashboard_payload(cache_row)
+            if payload is not None:
+                return payload
+
+        payload = build_dashboard_payload(signature)
+        save_dashboard_cache(signature, payload)
+        payload["dashboard_cached_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        return payload
+
+
 def compute_overdue_report(invoice_path):
     df = load_invoice_df(invoice_path)
     group_map = get_group_membership_map()
     single_map = get_single_recipients_map()
     custom_print_ids = get_custom_print_invoice_ids()
-    today = date.today()
+    today = get_business_date()
 
     grouped = {}
     group_invoices = {}
@@ -3784,93 +4093,7 @@ def index():
         and not (r["recipient_type"] == "single" and r["id"] in grouped_customer_ids)
     ]
 
-    financials = compute_dashboard_financials()
-    overdue_chart = build_pie_chart(
-        [
-            ("Current", financials["current_amount"], "#2d8a4e"),
-            ("Overdue (No Autopay)", financials["overdue_no_autopay_amount"], "#d14f4f"),
-            ("ACH Overdue", financials["overdue_ach_amount"], "#2f6fab"),
-            ("CC Overdue", financials["overdue_cc_amount"], "#7f3fbf"),
-        ]
-    )
-
-    term_color_map = {
-        "net_7": "#1f77b4",
-        "net_15": "#ff7f0e",
-        "net_20": "#2ca02c",
-        "net_30": "#d62728",
-        "net_45": "#9467bd",
-        "cod": "#8c564b",
-        "bill_to_bill": "#e377c2",
-        "month_to_month": "#7f7f7f",
-        "week_to_week": "#bcbd22",
-    }
-
-    overdue_terms_non_autopay_totals = {}
-    overdue_terms_non_autopay_customers = {}
-    overdue_terms_ach_totals = {}
-    overdue_terms_ach_customers = {}
-    overdue_terms_cc_totals = {}
-    overdue_terms_cc_customers = {}
-    if not financials["error"]:
-        try:
-            _, invoice_path = get_invoice_for_run()
-            (
-                overdue_terms_non_autopay_totals,
-                overdue_terms_non_autopay_customers,
-            ) = compute_overdue_terms_breakdown(invoice_path, autopay_filter="none")
-            overdue_terms_ach_totals, overdue_terms_ach_customers = compute_overdue_terms_breakdown(
-                invoice_path, autopay_filter="ach"
-            )
-            overdue_terms_cc_totals, overdue_terms_cc_customers = compute_overdue_terms_breakdown(
-                invoice_path, autopay_filter="cc"
-            )
-        except Exception:
-            overdue_terms_non_autopay_totals = {}
-            overdue_terms_non_autopay_customers = {}
-            overdue_terms_ach_totals = {}
-            overdue_terms_ach_customers = {}
-            overdue_terms_cc_totals = {}
-            overdue_terms_cc_customers = {}
-
-    def build_overdue_terms_chart(totals):
-        segments = []
-        for code, amount in sorted(totals.items(), key=lambda item: item[1], reverse=True):
-            if amount <= 0:
-                continue
-            segments.append(
-                (
-                    code,
-                    TERM_CODE_TO_LABEL.get(code, code),
-                    float(amount),
-                    term_color_map.get(code, "#17becf"),
-                )
-            )
-        return build_svg_pie_chart(segments)
-
-    overdue_terms_non_autopay_chart = build_overdue_terms_chart(overdue_terms_non_autopay_totals)
-    overdue_terms_ach_chart = build_overdue_terms_chart(overdue_terms_ach_totals)
-    overdue_terms_cc_chart = build_overdue_terms_chart(overdue_terms_cc_totals)
-
-    terms_counts, terms_customers = get_terms_distribution(include_customers=True)
-    terms_segments = []
-    known_codes = [code for code, _ in TERM_OPTIONS]
-    for code in known_codes:
-        count = terms_counts.get(code, 0)
-        if count > 0:
-            terms_segments.append(
-                (
-                    code,
-                    TERM_CODE_TO_LABEL.get(code, code),
-                    float(count),
-                    term_color_map.get(code, "#17becf"),
-                )
-            )
-    for code, count in terms_counts.items():
-        if code in known_codes or count <= 0:
-            continue
-        terms_segments.append((code, TERM_CODE_TO_LABEL.get(code, code), float(count), "#17becf"))
-    terms_chart = build_treemap_chart(terms_segments)
+    dashboard_payload = get_cached_dashboard_payload()
 
     return render_template(
         "index.html",
@@ -3879,29 +4102,9 @@ def index():
         runs=runs,
         due=due,
         today=today,
-        total_receivable=financials["total_receivable"],
-        total_overdue_amount=(
-            financials["overdue_no_autopay_amount"]
-            + financials["overdue_ach_amount"]
-            + financials["overdue_cc_amount"]
-        ),
-        total_overdue_no_autopay_amount=financials["overdue_no_autopay_amount"],
-        total_overdue_ach_amount=financials["overdue_ach_amount"],
-        total_overdue_cc_amount=financials["overdue_cc_amount"],
-        total_current_amount=financials["current_amount"],
-        dashboard_invoice_label=financials["invoice_label"],
-        dashboard_error=financials["error"],
-        overdue_chart=overdue_chart,
-        overdue_terms_non_autopay_chart=overdue_terms_non_autopay_chart,
-        overdue_terms_non_autopay_customers=overdue_terms_non_autopay_customers,
-        overdue_terms_ach_chart=overdue_terms_ach_chart,
-        overdue_terms_ach_customers=overdue_terms_ach_customers,
-        overdue_terms_cc_chart=overdue_terms_cc_chart,
-        overdue_terms_cc_customers=overdue_terms_cc_customers,
-        terms_chart=terms_chart,
-        terms_customers=terms_customers,
         active_schedule_job=active_schedule_job,
         schedule_jobs=schedule_jobs,
+        **dashboard_payload,
     )
 
 
@@ -4446,6 +4649,7 @@ def customers():
             )
             conn.commit()
             conn.close()
+            invalidate_dashboard_cache()
             flash(f"Customer {customer_name} added.", "success")
             return redirect(url_for("customers"))
 
@@ -4513,6 +4717,7 @@ def customers():
 
             conn.commit()
             conn.close()
+            invalidate_dashboard_cache()
             flash(f"Group {group_name} created.", "success")
             return redirect(url_for("customers"))
 
@@ -4546,6 +4751,7 @@ def customers():
             )
             conn.commit()
             conn.close()
+            invalidate_dashboard_cache()
             flash("Customer name updated.", "success")
             return redirect(url_for("customers"))
 
@@ -4614,6 +4820,7 @@ def customers():
 
             conn.commit()
             conn.close()
+            invalidate_dashboard_cache()
             flash(
                 f"Merged {source_name} into {target_name}. Alias saved for statement matching.",
                 "success",
@@ -4625,6 +4832,8 @@ def customers():
             conn.close()
             try:
                 added, updated, skipped, skipped_details = import_bulk_customers_from_upload(upload)
+                if added or updated:
+                    invalidate_dashboard_cache()
                 flash(f"Bulk update complete. Added {added}, updated {updated}, skipped {skipped}.", "success")
                 if skipped_details:
                     preview = "; ".join(skipped_details[:5])
@@ -4798,6 +5007,7 @@ def edit_customer(recipient_id):
 
         conn.commit()
         conn.close()
+        invalidate_dashboard_cache()
         flash("Customer updated.", "success")
         return redirect(url_for("customers"))
 
@@ -4840,6 +5050,7 @@ def delete_customer(recipient_id):
     cur.execute("DELETE FROM recipients WHERE id = ?", (recipient_id,))
     conn.commit()
     conn.close()
+    invalidate_dashboard_cache()
     flash("Customer deleted.", "success")
     return redirect(url_for("customers"))
 
@@ -4867,6 +5078,7 @@ def custom_print_invoices():
                 (invoice_id, now),
             )
             conn.commit()
+            invalidate_dashboard_cache()
             flash(f"Added custom print invoice #{invoice_id}.", "success")
         except sqlite3.IntegrityError:
             flash(f"Invoice #{invoice_id} is already on the custom print list.", "success")
@@ -4917,6 +5129,7 @@ def custom_print_invoice_delete(item_id):
     conn.commit()
     conn.close()
     if deleted:
+        invalidate_dashboard_cache()
         flash("Custom print invoice removed.", "success")
     else:
         flash("Invoice not found.", "error")
@@ -4945,6 +5158,7 @@ def uploads():
         )
         conn.commit()
         conn.close()
+        invalidate_dashboard_cache()
         flash("Invoice file uploaded", "success")
         return redirect(url_for("uploads"))
 
@@ -5116,6 +5330,7 @@ def settings():
                 set_setting("logo_path", logo_path)
             except Exception as exc:
                 flash(f"Logo upload failed: {exc}", "error")
+        invalidate_dashboard_cache()
         flash("Settings saved", "success")
         return redirect(url_for("settings", tab="general"))
 
