@@ -51,11 +51,11 @@
   <div class="panel">
     <h2>Receivable Snapshot</h2>
     <div class="stats-grid">
-      <div class="chart-card">
+      <div class="chart-card receivable-card">
         <p class="kpi-label">Total Receivable</p>
         <p class="kpi-value">${{ "{:,.2f}".format(total_receivable) }}</p>
         <p class="kpi-note"><small>Open invoices from current invoice source</small></p>
-        <h3 class="chart-subtitle">Overdue Share</h3>
+        <h3 class="chart-subtitle">Receivable Breakdown</h3>
         {% if overdue_chart.has_data %}
           <div class="pie-row">
             <div class="pie-circle" style="background: {{ overdue_chart.gradient }}">
@@ -74,11 +74,146 @@
                   <p class="chart-total-label">{{ item.label }}</p>
                   <p class="chart-total-value">${{ "{:,.2f}".format(item.value) }}</p>
                 </div>
+                {% if loop.first %}
+                  <div class="chart-total-item">
+                    <p class="chart-total-label">Total Overdue</p>
+                    <p class="chart-total-value">${{ "{:,.2f}".format(total_overdue_amount) }}</p>
+                  </div>
+                {% endif %}
               {% endfor %}
             </div>
           </div>
         {% else %}
           <p><small>No open invoice data available yet.</small></p>
+        {% endif %}
+      </div>
+      <div class="chart-card">
+        <h3>Overdue Balance By Terms (No Autopay)</h3>
+        {% if overdue_terms_non_autopay_chart.has_data %}
+          <div class="overdue-terms-chart-wrap">
+            <svg class="overdue-terms-pie" viewBox="0 0 120 120" role="img" aria-label="Overdue balance by terms">
+              {% for slice in overdue_terms_non_autopay_chart.slices %}
+                <path
+                  class="overdue-terms-slice"
+                  d="{{ slice.path }}"
+                  fill="{{ slice.color }}"
+                  data-bucket="none"
+                  data-term-code="{{ slice.code }}"
+                  data-term-label="{{ slice.label }}"
+                ></path>
+              {% endfor %}
+              {% for label in overdue_terms_non_autopay_chart.labels %}
+                <text
+                  x="{{ "%.2f"|format(label.x) }}"
+                  y="{{ "%.2f"|format(label.y) }}"
+                  text-anchor="middle"
+                  dominant-baseline="middle"
+                  class="overdue-terms-pie-label"
+                >
+                  {{ label.text }}
+                </text>
+              {% endfor %}
+            </svg>
+            <ul class="chart-legend overdue-terms-legend">
+              {% for item in overdue_terms_non_autopay_chart.legend %}
+                <li>
+                  <button type="button" class="legend-link overdue-terms-trigger" data-bucket="none" data-term-code="{{ item.code }}" data-term-label="{{ item.label }}">
+                    <span class="legend-dot" style="background: {{ item.color }}"></span>
+                    <span>{{ item.label }}</span>
+                  </button>
+                  <span>${{ "{:,.2f}".format(item.value) }}</span>
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% else %}
+          <p><small>No non-autopay overdue balances available by terms.</small></p>
+        {% endif %}
+      </div>
+      <div class="chart-card">
+        <h3>Overdue Balance By Terms (ACH)</h3>
+        {% if overdue_terms_ach_chart.has_data %}
+          <div class="overdue-terms-chart-wrap">
+            <svg class="overdue-terms-pie" viewBox="0 0 120 120" role="img" aria-label="ACH overdue balance by terms">
+              {% for slice in overdue_terms_ach_chart.slices %}
+                <path
+                  class="overdue-terms-slice"
+                  d="{{ slice.path }}"
+                  fill="{{ slice.color }}"
+                  data-bucket="ach"
+                  data-term-code="{{ slice.code }}"
+                  data-term-label="{{ slice.label }}"
+                ></path>
+              {% endfor %}
+              {% for label in overdue_terms_ach_chart.labels %}
+                <text
+                  x="{{ "%.2f"|format(label.x) }}"
+                  y="{{ "%.2f"|format(label.y) }}"
+                  text-anchor="middle"
+                  dominant-baseline="middle"
+                  class="overdue-terms-pie-label"
+                >
+                  {{ label.text }}
+                </text>
+              {% endfor %}
+            </svg>
+            <ul class="chart-legend overdue-terms-legend">
+              {% for item in overdue_terms_ach_chart.legend %}
+                <li>
+                  <button type="button" class="legend-link overdue-terms-trigger" data-bucket="ach" data-term-code="{{ item.code }}" data-term-label="{{ item.label }}">
+                    <span class="legend-dot" style="background: {{ item.color }}"></span>
+                    <span>{{ item.label }}</span>
+                  </button>
+                  <span>${{ "{:,.2f}".format(item.value) }}</span>
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% else %}
+          <p><small>No ACH overdue balances available by terms.</small></p>
+        {% endif %}
+      </div>
+      <div class="chart-card">
+        <h3>Overdue Balance By Terms (CC)</h3>
+        {% if overdue_terms_cc_chart.has_data %}
+          <div class="overdue-terms-chart-wrap">
+            <svg class="overdue-terms-pie" viewBox="0 0 120 120" role="img" aria-label="CC overdue balance by terms">
+              {% for slice in overdue_terms_cc_chart.slices %}
+                <path
+                  class="overdue-terms-slice"
+                  d="{{ slice.path }}"
+                  fill="{{ slice.color }}"
+                  data-bucket="cc"
+                  data-term-code="{{ slice.code }}"
+                  data-term-label="{{ slice.label }}"
+                ></path>
+              {% endfor %}
+              {% for label in overdue_terms_cc_chart.labels %}
+                <text
+                  x="{{ "%.2f"|format(label.x) }}"
+                  y="{{ "%.2f"|format(label.y) }}"
+                  text-anchor="middle"
+                  dominant-baseline="middle"
+                  class="overdue-terms-pie-label"
+                >
+                  {{ label.text }}
+                </text>
+              {% endfor %}
+            </svg>
+            <ul class="chart-legend overdue-terms-legend">
+              {% for item in overdue_terms_cc_chart.legend %}
+                <li>
+                  <button type="button" class="legend-link overdue-terms-trigger" data-bucket="cc" data-term-code="{{ item.code }}" data-term-label="{{ item.label }}">
+                    <span class="legend-dot" style="background: {{ item.color }}"></span>
+                    <span>{{ item.label }}</span>
+                  </button>
+                  <span>${{ "{:,.2f}".format(item.value) }}</span>
+                </li>
+              {% endfor %}
+            </ul>
+          </div>
+        {% else %}
+          <p><small>No CC overdue balances available by terms.</small></p>
         {% endif %}
       </div>
       <div class="chart-card">
@@ -208,12 +343,31 @@
     </div>
   </div>
 
+  <div id="overdueTermsModal" class="modal">
+    <div class="modal-card">
+      <h3 id="overdueTermsTitle">Overdue Customers</h3>
+      <ul id="overdueTermsList" class="terms-customer-list"></ul>
+      <div class="actions">
+        <button type="button" class="secondary" id="overdueTermsClose">Close</button>
+      </div>
+    </div>
+  </div>
+
   <script>
     const termsCustomers = {{ terms_customers | tojson }};
+    const overdueTermsCustomersByBucket = {
+      none: {{ overdue_terms_non_autopay_customers | tojson }},
+      ach: {{ overdue_terms_ach_customers | tojson }},
+      cc: {{ overdue_terms_cc_customers | tojson }},
+    };
     const termsModal = document.getElementById('termsCustomersModal');
     const termsModalTitle = document.getElementById('termsCustomersTitle');
     const termsModalList = document.getElementById('termsCustomersList');
     const termsModalClose = document.getElementById('termsCustomersClose');
+    const overdueTermsModal = document.getElementById('overdueTermsModal');
+    const overdueTermsTitle = document.getElementById('overdueTermsTitle');
+    const overdueTermsList = document.getElementById('overdueTermsList');
+    const overdueTermsClose = document.getElementById('overdueTermsClose');
 
     function openTermsModal(termCode, termLabel) {
       const customers = termsCustomers[termCode] || [];
@@ -233,11 +387,55 @@
       termsModal.classList.add('active');
     }
 
+    function overdueBucketLabel(bucket) {
+      if (bucket === 'ach') return 'ACH';
+      if (bucket === 'cc') return 'CC';
+      return 'No Autopay';
+    }
+
+    function openOverdueTermsModal(bucket, termCode, termLabel) {
+      const map = overdueTermsCustomersByBucket[bucket] || {};
+      const customers = map[termCode] || [];
+      overdueTermsTitle.textContent = `${termLabel} — ${overdueBucketLabel(bucket)} (${customers.length})`;
+      overdueTermsList.innerHTML = '';
+      if (!customers.length) {
+        const li = document.createElement('li');
+        li.textContent = 'No overdue customers found for this term.';
+        overdueTermsList.appendChild(li);
+      } else {
+        customers.forEach((item) => {
+          const li = document.createElement('li');
+          const amount = Number(item.amount || 0);
+          li.textContent = `${item.name} — $${amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+          overdueTermsList.appendChild(li);
+        });
+      }
+      overdueTermsModal.classList.add('active');
+    }
+
     document.querySelectorAll('.treemap-tile.clickable').forEach((tile) => {
       tile.addEventListener('click', () => {
         const termCode = tile.dataset.termCode || '';
         const termLabel = tile.dataset.termLabel || 'Term';
         openTermsModal(termCode, termLabel);
+      });
+    });
+
+    document.querySelectorAll('.overdue-terms-slice').forEach((slice) => {
+      slice.addEventListener('click', () => {
+        const bucket = slice.dataset.bucket || 'none';
+        const termCode = slice.dataset.termCode || '';
+        const termLabel = slice.dataset.termLabel || 'Term';
+        openOverdueTermsModal(bucket, termCode, termLabel);
+      });
+    });
+
+    document.querySelectorAll('.overdue-terms-trigger').forEach((button) => {
+      button.addEventListener('click', () => {
+        const bucket = button.dataset.bucket || 'none';
+        const termCode = button.dataset.termCode || '';
+        const termLabel = button.dataset.termLabel || 'Term';
+        openOverdueTermsModal(bucket, termCode, termLabel);
       });
     });
 
@@ -250,6 +448,18 @@
       if (event.target === termsModal) {
         termsModal.classList.remove('active');
         termsModalList.innerHTML = '';
+      }
+    });
+
+    overdueTermsClose.addEventListener('click', () => {
+      overdueTermsModal.classList.remove('active');
+      overdueTermsList.innerHTML = '';
+    });
+
+    overdueTermsModal.addEventListener('click', (event) => {
+      if (event.target === overdueTermsModal) {
+        overdueTermsModal.classList.remove('active');
+        overdueTermsList.innerHTML = '';
       }
     });
 

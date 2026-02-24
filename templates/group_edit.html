@@ -44,6 +44,19 @@
           <input name="day_of_month" type="number" min="1" max="28" value="{{ recipient['day_of_month'] or 1 }}" />
         </div>
         <div>
+          <label>Autopay</label>
+          <div class="autopay-options" data-autopay-group>
+            <label class="autopay-option">
+              <input type="checkbox" name="autopay_ach" {% if (recipient['autopay_type'] or '') == 'ach' %}checked{% endif %} />
+              ACH
+            </label>
+            <label class="autopay-option">
+              <input type="checkbox" name="autopay_cc" {% if (recipient['autopay_type'] or '') == 'cc' %}checked{% endif %} />
+              CC
+            </label>
+          </div>
+        </div>
+        <div>
           <label>Active</label>
           <input name="active" type="checkbox" {% if recipient['active'] %}checked{% endif %} />
         </div>
@@ -84,6 +97,22 @@
   </div>
 
   <script>
+    document.querySelectorAll('[data-autopay-group]').forEach((group) => {
+      const checkboxes = Array.from(group.querySelectorAll('input[type="checkbox"]'));
+      checkboxes.forEach((checkbox) => {
+        checkbox.addEventListener('change', () => {
+          if (!checkbox.checked) {
+            return;
+          }
+          checkboxes.forEach((other) => {
+            if (other !== checkbox) {
+              other.checked = false;
+            }
+          });
+        });
+      });
+    });
+
     const groupModal = document.getElementById('groupMembersModal');
     const openGroupMembers = document.getElementById('openGroupMembers');
     const closeGroupMembers = document.getElementById('closeGroupMembers');

@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Custom Print Invoices</h2>
+    <p><small>Custom print invoices are excluded from overdue, skipped, and short-paid calculations.</small></p>
+    <form method="post" class="row custom-print-form">
+      <div>
+        <label>Invoice Number</label>
+        <input name="invoice_id" placeholder="Type invoice number" required />
+      </div>
+      <div class="custom-print-add-wrap">
+        <button type="submit">Add</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>Registered Invoices</h2>
+    {% if source_label %}
+      <p><small>Source file: {{ source_label }}</small></p>
+    {% endif %}
+    {% if source_error %}
+      <p><small>{{ source_error }}</small></p>
+    {% endif %}
+    <div class="row">
+      <div>
+        <label>Search</label>
+        <input id="customPrintSearch" placeholder="Search invoice #, customer, order date" />
+      </div>
+    </div>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Invoice #</th>
+          <th>Customer</th>
+          <th>Order Date</th>
+          <th>Status</th>
+          <th>Added</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="customPrintTableBody">
+        {% for row in rows %}
+          <tr data-search="{{ (row['invoice_id'] ~ ' ' ~ row['customer_name'] ~ ' ' ~ row['order_date']) | lower }}">
+            <td>{{ row['invoice_id'] }}</td>
+            <td>{{ row['customer_name'] or '-' }}</td>
+            <td>{{ row['order_date'] or '-' }}</td>
+            <td>
+              {% if row['found'] %}
+                <span class="status-pill found">Found</span>
+              {% else %}
+                <span class="status-pill missing">Not Found In Source</span>
+              {% endif %}
+            </td>
+            <td>{{ row['created_at'] }}</td>
+            <td class="actions">
+              <form method="post" action="{{ url_for('custom_print_invoice_delete', item_id=row['id']) }}" onsubmit="return confirm('Remove invoice #{{ row['invoice_id'] }} from custom print list?');">
+                <button type="submit" class="danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">No custom print invoices registered.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <script>
+    const customPrintSearch = document.getElementById('customPrintSearch');
+    const customPrintRows = Array.from(document.querySelectorAll('#customPrintTableBody tr[data-search]'));
+    if (customPrintSearch) {
+      customPrintSearch.addEventListener('input', () => {
+        const query = (customPrintSearch.value || '').toLowerCase().trim();
+        customPrintRows.forEach((row) => {
+          const text = row.dataset.search || '';
+          row.style.display = !query || text.includes(query) ? '' : 'none';
+        });
+      });
+    }
+  </script>
+{% endblock %}

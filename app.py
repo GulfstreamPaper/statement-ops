@@ -50,6 +50,16 @@ TERM_DAYS = {
 }
 TERM_LABEL_TO_CODE = {label.lower(): code for code, label in TERM_OPTIONS}
 TERM_CODE_TO_LABEL = {code: label for code, label in TERM_OPTIONS}
+AUTOPAY_OPTIONS = [
+    ("ach", "ACH"),
+    ("cc", "CC"),
+]
+AUTOPAY_LABELS = {
+    "": "None",
+    "none": "None",
+    "ach": "ACH",
+    "cc": "CC",
+}
 EMAIL_TEMPLATE_DEFAULTS = {
     "statement": (
         "Dear Customer,\n\n"
@@ -130,6 +140,7 @@ def init_db():
             email_to TEXT NOT NULL,
             net_terms INTEGER DEFAULT 30,
             terms_code TEXT DEFAULT 'net_30',
+            autopay_type TEXT DEFAULT '',
             location TEXT,
             frequency TEXT DEFAULT 'weekly',
             day_of_week INTEGER DEFAULT 0,
@@ -226,6 +237,12 @@ def init_db():
             FOREIGN KEY(recipient_id) REFERENCES recipients(id)
         );
 
+        CREATE TABLE IF NOT EXISTS custom_print_invoices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            invoice_id TEXT UNIQUE NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS statement_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             recipient_id INTEGER NOT NULL,
@@ -282,6 +299,9 @@ def init_db():
         cur.execute("ALTER TABLE recipients ADD COLUMN terms_code TEXT DEFAULT 'net_30'")
     if "recipient_type" not in cols:
         cur.execute("ALTER TABLE recipients ADD COLUMN recipient_type TEXT DEFAULT 'single'")
+    if "autopay_type" not in cols:
+        cur.execute("ALTER TABLE recipients ADD COLUMN autopay_type TEXT DEFAULT ''")
+    cur.execute("UPDATE recipients SET autopay_type = '' WHERE autopay_type IS NULL")
 
     cur.execute("SELECT id, net_terms, terms_code FROM recipients")
     rows = cur.fetchall()
@@ -341,6 +361,10 @@ def init_db():
     cur.execute(
         "CREATE INDEX IF NOT EXISTS idx_notice_sent_invoice_lookup "
         "ON notice_sent_invoices(notice_type, recipient_id)"
+    )
+    cur.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_custom_print_invoice_unique "
+        "ON custom_print_invoices(invoice_id)"
     )
 
     cur.execute(
@@ -524,6 +548,51 @@ def get_terms_code(value, fallback="net_30"):
 
 def get_terms_days(terms_code):
     return TERM_DAYS.get(terms_code, 0)
+
+
+def normalize_autopay_type(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    v = str(value).strip().lower()
+    if not v:
+        return ""
+    v = v.replace("_", "").replace("-", "").replace(" ", "")
+    if v in {"none", "no", "off", "false", "0"}:
+        return ""
+    if v == "ach":
+        return "ach"
+    if v in {"cc", "card", "creditcard", "credit"}:
+        return "cc"
+    return None
+
+
+def parse_autopay_from_form(form):
+    if form.get("autopay_ach") == "on":
+        return "ach"
+    if form.get("autopay_cc") == "on":
+        return "cc"
+    return ""
+
+
+def get_autopay_label(value):
+    code = normalize_autopay_type(value)
+    if code is None:
+        code = ""
+    return AUTOPAY_LABELS.get(code, "None")
+
+
+def normalize_autopay_filter(value, default="all"):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return default
+    v = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    mapping = {
+        "all": "all",
+        "none": "none",
+        "no_autopay": "none",
+        "ach": "ach",
+        "cc": "cc",
+    }
+    return mapping.get(v, default)
 
 
 def parse_ship_date(value):
@@ -853,6 +922,66 @@ def normalize_invoice_id(value):
         return str(int(float(text)))
     except Exception:
         return text
+
+
+def get_custom_print_invoice_ids():
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT invoice_id FROM custom_print_invoices")
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    ids = set()
+    for row in rows:
+        invoice_id = normalize_invoice_id(row["invoice_id"])
+        if invoice_id:
+            ids.add(invoice_id)
+    return ids
+
+
+def get_custom_print_invoice_records():
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, invoice_id, created_at FROM custom_print_invoices ORDER BY created_at DESC, id DESC")
+        rows = [dict(row) for row in cur.fetchall()]
+    except sqlite3.OperationalError:
+        rows = []
+    conn.close()
+    return rows
+
+
+def build_custom_print_invoice_lookup(invoice_path):
+    lookup = {}
+    if not invoice_path or not os.path.exists(invoice_path):
+        return lookup
+    try:
+        df = load_invoice_df(invoice_path)
+    except Exception:
+        return lookup
+    for _, row in df.iterrows():
+        invoice_id = normalize_invoice_id(row.get("Order ID"))
+        if not invoice_id or invoice_id in lookup:
+            continue
+        customer_name = normalize_name(row.get("Customer Name"))
+
+        order_value = row.get("Order Date")
+        if order_value is None or (isinstance(order_value, float) and pd.isna(order_value)):
+            order_value = row.get("Shipping Date")
+        order_date = ""
+        parsed = pd.to_datetime(order_value, errors="coerce")
+        if not pd.isnull(parsed):
+            order_date = parsed.strftime("%m/%d/%Y")
+        elif order_value is not None and not (isinstance(order_value, float) and pd.isna(order_value)):
+            order_date = str(order_value).strip()
+
+        lookup[invoice_id] = {
+            "customer_name": customer_name,
+            "order_date": order_date,
+        }
+    return lookup
 
 
 def get_latest_overdue_run():
@@ -1226,7 +1355,7 @@ def get_recipients_terms_map():
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, group_name, terms_code, net_terms, recipient_type, email_to FROM recipients WHERE active = 1"
+        "SELECT id, group_name, terms_code, net_terms, recipient_type, email_to, autopay_type FROM recipients WHERE active = 1"
     )
     rows = cur.fetchall()
     conn.close()
@@ -1236,6 +1365,7 @@ def get_recipients_terms_map():
         recipients_map[row["group_name"]] = {
             "id": row["id"],
             "terms_code": terms_code,
+            "autopay_type": normalize_autopay_type(row["autopay_type"]) or "",
             "recipient_type": row["recipient_type"] or "single",
             "has_email": has_email_value(row["email_to"]),
         }
@@ -1246,7 +1376,7 @@ def get_single_recipients_map():
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, group_name, terms_code, net_terms FROM recipients "
+        "SELECT id, group_name, terms_code, net_terms, autopay_type FROM recipients "
         "WHERE recipient_type = 'single' AND active = 1"
     )
     rows = cur.fetchall()
@@ -1267,6 +1397,7 @@ def get_single_recipients_map():
             "id": row["id"],
             "group_name": row["group_name"],
             "terms_code": terms_code,
+            "autopay_type": normalize_autopay_type(row["autopay_type"]) or "",
         }
         for key in keys:
             mapping[key] = payload
@@ -1278,7 +1409,7 @@ def get_group_membership_map():
     cur = conn.cursor()
     cur.execute(
         "SELECT c.id AS customer_id, c.group_name AS customer_name, g.id AS group_id, g.group_name AS group_name, "
-        "g.terms_code, g.net_terms "
+        "g.terms_code, g.net_terms, g.autopay_type "
         "FROM group_members gm "
         "JOIN recipients c ON c.id = gm.customer_id "
         "JOIN recipients g ON g.id = gm.group_id "
@@ -1302,6 +1433,7 @@ def get_group_membership_map():
             "group_id": row["group_id"],
             "group_name": row["group_name"],
             "terms_code": terms_code,
+            "autopay_type": normalize_autopay_type(row["autopay_type"]) or "",
         }
         for key in keys:
             mapping[key] = payload
@@ -1393,11 +1525,11 @@ def get_all_single_name_keys():
     return keys
 
 
-def get_dashboard_terms_lookup(include_excluded=False):
+def get_dashboard_customer_lookup(include_excluded=False):
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, group_name, active, terms_code, net_terms FROM recipients WHERE recipient_type = 'single'"
+        "SELECT id, group_name, active, terms_code, net_terms, autopay_type FROM recipients WHERE recipient_type = 'single'"
     )
     singles = cur.fetchall()
     single_ids = [row["id"] for row in singles]
@@ -1415,7 +1547,8 @@ def get_dashboard_terms_lookup(include_excluded=False):
             aliases_by_id.setdefault(row["recipient_id"], []).append(alias_name)
     cur.execute(
         "SELECT c.id AS customer_id, c.group_name AS customer_name, c.active AS customer_active, "
-        "g.active AS group_active, g.terms_code AS group_terms_code, g.net_terms AS group_net_terms "
+        "g.active AS group_active, g.terms_code AS group_terms_code, g.net_terms AS group_net_terms, "
+        "g.autopay_type AS group_autopay_type "
         "FROM group_members gm "
         "JOIN recipients c ON c.id = gm.customer_id "
         "JOIN recipients g ON g.id = gm.group_id "
@@ -1449,8 +1582,9 @@ def get_dashboard_terms_lookup(include_excluded=False):
             or normalize_terms_code(row["group_net_terms"])
             or "net_30"
         )
+        autopay_type = normalize_autopay_type(row["group_autopay_type"]) or ""
         for key in keys:
-            lookup[key] = terms_code
+            lookup[key] = {"terms_code": terms_code, "autopay_type": autopay_type}
             excluded.discard(key)
 
     for row in singles:
@@ -1470,12 +1604,22 @@ def get_dashboard_terms_lookup(include_excluded=False):
                 excluded.add(key)
             continue
         terms_code = row["terms_code"] or normalize_terms_code(row["net_terms"]) or "net_30"
+        autopay_type = normalize_autopay_type(row["autopay_type"]) or ""
         for key in keys:
-            lookup[key] = terms_code
+            lookup[key] = {"terms_code": terms_code, "autopay_type": autopay_type}
 
     if include_excluded:
         return lookup, excluded
     return lookup
+
+
+def get_dashboard_terms_lookup(include_excluded=False):
+    if include_excluded:
+        lookup, excluded = get_dashboard_customer_lookup(include_excluded=True)
+        terms_lookup = {key: value["terms_code"] for key, value in lookup.items()}
+        return terms_lookup, excluded
+    lookup = get_dashboard_customer_lookup(include_excluded=False)
+    return {key: value["terms_code"] for key, value in lookup.items()}
 
 
 def get_terms_distribution(include_customers=False):
@@ -1588,6 +1732,97 @@ def build_pie_chart(segments):
     }
 
 
+def build_svg_pie_chart(segments):
+    total = sum(float(value) for _, _, value, _ in segments)
+    if total <= 0:
+        return {
+            "has_data": False,
+            "slices": [],
+            "labels": [],
+            "legend": [],
+            "total": 0,
+        }
+
+    cx = 60.0
+    cy = 60.0
+    radius = 50.0
+    start_angle = -90.0
+    slices = []
+    labels = []
+    legend = []
+
+    for code, label, value, color in segments:
+        value = float(value)
+        if value <= 0:
+            continue
+
+        percent = (value / total) * 100.0
+        sweep = (percent / 100.0) * 360.0
+        end_angle = start_angle + sweep
+        start_rad = math.radians(start_angle)
+        end_rad = math.radians(end_angle)
+
+        x1 = cx + radius * math.cos(start_rad)
+        y1 = cy + radius * math.sin(start_rad)
+        x2 = cx + radius * math.cos(end_rad)
+        y2 = cy + radius * math.sin(end_rad)
+
+        if percent >= 99.999:
+            path = (
+                f"M {cx:.3f} {cy - radius:.3f} "
+                f"A {radius:.3f} {radius:.3f} 0 1 1 {cx - 0.01:.3f} {cy - radius:.3f} "
+                f"A {radius:.3f} {radius:.3f} 0 1 1 {cx:.3f} {cy - radius:.3f} Z"
+            )
+        else:
+            large_arc = 1 if sweep > 180.0 else 0
+            path = (
+                f"M {cx:.3f} {cy:.3f} "
+                f"L {x1:.3f} {y1:.3f} "
+                f"A {radius:.3f} {radius:.3f} 0 {large_arc} 1 {x2:.3f} {y2:.3f} Z"
+            )
+
+        slices.append(
+            {
+                "code": code,
+                "label": label,
+                "value": value,
+                "percent": percent,
+                "color": color,
+                "path": path,
+            }
+        )
+        legend.append(
+            {
+                "code": code,
+                "label": label,
+                "value": value,
+                "percent": percent,
+                "color": color,
+            }
+        )
+
+        if percent >= 7.0:
+            mid_angle = start_angle + (sweep / 2.0)
+            mid_rad = math.radians(mid_angle)
+            labels.append(
+                {
+                    "text": f"{percent:.1f}%",
+                    "x": cx + 30.0 * math.cos(mid_rad),
+                    "y": cy + 30.0 * math.sin(mid_rad),
+                }
+            )
+
+        start_angle = end_angle
+
+    return {
+        "has_data": bool(slices),
+        "slices": slices,
+        "labels": labels,
+        "legend": legend,
+        "total": total,
+    }
+
+
 def build_treemap_chart(segments):
     total = 0.0
     for segment in segments:
@@ -1695,7 +1930,9 @@ def build_treemap_chart(segments):
 def compute_dashboard_financials():
     result = {
         "total_receivable": 0.0,
-        "overdue_amount": 0.0,
+        "overdue_no_autopay_amount": 0.0,
+        "overdue_ach_amount": 0.0,
+        "overdue_cc_amount": 0.0,
         "current_amount": 0.0,
         "invoice_label": None,
         "error": None,
@@ -1718,7 +1955,8 @@ def compute_dashboard_financials():
     if not result["invoice_label"]:
         result["invoice_label"] = os.path.basename(invoice_path)
 
-    terms_lookup, excluded_customer_keys = get_dashboard_terms_lookup(include_excluded=True)
+    customer_lookup, excluded_customer_keys = get_dashboard_customer_lookup(include_excluded=True)
+    custom_print_ids = get_custom_print_invoice_ids()
     open_items = []
     total_receivable = 0.0
 
@@ -1735,28 +1973,132 @@ def compute_dashboard_financials():
         customer_key = name_key(customer)
         if customer_key in excluded_customer_keys:
             continue
-        terms_code = terms_lookup.get(customer_key, "net_30")
+        profile = customer_lookup.get(customer_key, {"terms_code": "net_30", "autopay_type": ""})
+        terms_code = profile.get("terms_code") or "net_30"
+        autopay_type = normalize_autopay_type(profile.get("autopay_type")) or ""
         ship_date = parse_ship_date(row.get("Shipping Date"))
+        invoice_id = normalize_invoice_id(row.get("Order ID"))
+        is_custom_print = bool(invoice_id and invoice_id in custom_print_ids)
         total_receivable += outstanding
         open_items.append(
             {
                 "customer_key": customer_key,
                 "terms_code": terms_code,
+                "autopay_type": autopay_type,
                 "ship_date": ship_date,
                 "outstanding": outstanding,
+                "is_custom_print": is_custom_print,
             }
         )
 
     today = date.today()
-    overdue_amount = 0.0
+    overdue_no_autopay_amount = 0.0
+    overdue_ach_amount = 0.0
+    overdue_cc_amount = 0.0
     grouped = {}
     for item in open_items:
         grouped.setdefault(item["customer_key"], []).append(item)
+
+    def add_overdue_amount(autopay_type, amount):
+        nonlocal overdue_no_autopay_amount, overdue_ach_amount, overdue_cc_amount
+        if amount <= 0:
+            return
+        normalized = normalize_autopay_type(autopay_type) or ""
+        if normalized == "ach":
+            overdue_ach_amount += amount
+        elif normalized == "cc":
+            overdue_cc_amount += amount
+        else:
+            overdue_no_autopay_amount += amount
 
     for items in grouped.values():
         if not items:
             continue
         terms_code = items[0]["terms_code"] or "net_30"
+        autopay_type = items[0].get("autopay_type", "")
+        if terms_code == "bill_to_bill":
+            sorted_items = sorted(
+                [i for i in items if not i.get("is_custom_print")],
+                key=lambda i: i["ship_date"],
+            )
+            for idx, item in enumerate(sorted_items):
+                ship_date = item["ship_date"]
+                if idx < len(sorted_items) - 1:
+                    due_date = sorted_items[idx + 1]["ship_date"]
+                else:
+                    due_date = ship_date + timedelta(days=15)
+                if today > due_date:
+                    add_overdue_amount(autopay_type, item["outstanding"])
+        else:
+            for item in items:
+                if item.get("is_custom_print"):
+                    continue
+                due_date = compute_due_date(item["ship_date"], terms_code)
+                if today > due_date:
+                    add_overdue_amount(autopay_type, item["outstanding"])
+
+    result["total_receivable"] = total_receivable
+    result["overdue_no_autopay_amount"] = overdue_no_autopay_amount
+    result["overdue_ach_amount"] = overdue_ach_amount
+    result["overdue_cc_amount"] = overdue_cc_amount
+    total_overdue = overdue_no_autopay_amount + overdue_ach_amount + overdue_cc_amount
+    result["current_amount"] = max(total_receivable - total_overdue, 0.0)
+    return result
+
+
+def compute_overdue_terms_breakdown(invoice_path, autopay_filter="none"):
+    customer_lookup, excluded_customer_keys = get_dashboard_customer_lookup(include_excluded=True)
+    filter_code = normalize_autopay_filter(autopay_filter, "none")
+    if filter_code == "all":
+        filter_code = None
+    elif filter_code == "none":
+        filter_code = ""
+    custom_print_ids = get_custom_print_invoice_ids()
+    df = load_invoice_df(invoice_path)
+    today = date.today()
+
+    customers = {}
+    for _, row in df.iterrows():
+        val_total = pd.to_numeric(row.get("Order Total"), errors="coerce")
+        val_paid = pd.to_numeric(row.get("Paid Amount", 0), errors="coerce")
+        amt = 0.0 if pd.isna(val_total) else float(val_total)
+        paid = 0.0 if pd.isna(val_paid) else float(val_paid)
+        outstanding = amt - paid
+        if outstanding <= 0.01:
+            continue
+
+        customer_name = normalize_name(row.get("Customer Name"))
+        customer_key = name_key(customer_name)
+        if not customer_key or customer_key in excluded_customer_keys:
+            continue
+        invoice_id = normalize_invoice_id(row.get("Order ID"))
+        if invoice_id and invoice_id in custom_print_ids:
+            continue
+
+        profile = customer_lookup.get(customer_key, {"terms_code": "net_30", "autopay_type": ""})
+        terms_code = profile.get("terms_code") or "net_30"
+        autopay_type = normalize_autopay_type(profile.get("autopay_type")) or ""
+        if filter_code is not None and autopay_type != filter_code:
+            continue
+        ship_date = parse_ship_date(row.get("Shipping Date"))
+        bucket = customers.setdefault(
+            customer_key,
+            {
+                "name": customer_name,
+                "terms_code": terms_code,
+                "items": [],
+            },
+        )
+        if customer_name and not bucket["name"]:
+            bucket["name"] = customer_name
+        bucket["items"].append({"ship_date": ship_date, "outstanding": outstanding})
+
+    totals = {}
+    customers_by_terms = {}
+    for customer_key, payload in customers.items():
+        terms_code = payload["terms_code"] or "net_30"
+        items = payload["items"]
+        overdue_amount = 0.0
         if terms_code == "bill_to_bill":
             sorted_items = sorted(items, key=lambda i: i["ship_date"])
             for idx, item in enumerate(sorted_items):
@@ -1773,16 +2115,31 @@ def compute_dashboard_financials():
                 if today > due_date:
                     overdue_amount += item["outstanding"]
 
-    result["total_receivable"] = total_receivable
-    result["overdue_amount"] = overdue_amount
-    result["current_amount"] = max(total_receivable - overdue_amount, 0.0)
-    return result
+        if overdue_amount <= 0.01:
+            continue
+
+        totals[terms_code] = totals.get(terms_code, 0.0) + overdue_amount
+        name = payload["name"] or customer_key
+        customers_by_terms.setdefault(terms_code, {})[customer_key] = {
+            "name": name,
+            "amount": overdue_amount,
+        }
+
+    customers_out = {}
+    for code, rows in customers_by_terms.items():
+        customers_out[code] = sorted(
+            [{"name": entry["name"], "amount": round(entry["amount"], 2)} for entry in rows.values()],
+            key=lambda entry: entry["name"].lower(),
+        )
+
+    return totals, customers_out
 
 
 def compute_overdue_report(invoice_path):
     df = load_invoice_df(invoice_path)
     group_map = get_group_membership_map()
     single_map = get_single_recipients_map()
+    custom_print_ids = get_custom_print_invoice_ids()
     today = date.today()
 
     grouped = {}
@@ -1803,6 +2160,7 @@ def compute_overdue_report(invoice_path):
         if group_entry:
             group_name = group_entry["group_name"]
             terms_code = group_entry["terms_code"]
+            autopay_type = group_entry.get("autopay_type", "")
             location = customer_name
         else:
             single_entry = single_map.get(key)
@@ -1810,15 +2168,14 @@ def compute_overdue_report(invoice_path):
                 continue
             group_name = single_entry["group_name"]
             terms_code = single_entry["terms_code"]
+            autopay_type = single_entry.get("autopay_type", "")
             # Singles (including merged aliases) should stay under one location bucket.
             location = group_name
         ship_date = parse_ship_date(row.get("Shipping Date"))
-        order_id = row.get("Order ID")
-        try:
-            order_id = str(int(float(order_id)))
-        except Exception:
-            order_id = str(order_id)
+        order_id = normalize_invoice_id(row.get("Order ID"))
         if amt <= 0:
+            continue
+        if order_id and order_id in custom_print_ids:
             continue
 
         group_invoices.setdefault(group_name, {})
@@ -1844,7 +2201,7 @@ def compute_overdue_report(invoice_path):
         if outstanding <= 0:
             continue
 
-        grouped.setdefault(group_name, {"terms_code": terms_code, "items": []})
+        grouped.setdefault(group_name, {"terms_code": terms_code, "autopay_type": autopay_type, "items": []})
         grouped[group_name]["items"].append(
             {
                 "ship_date": ship_date,
@@ -1936,6 +2293,7 @@ def compute_overdue_report(invoice_path):
             {
                 "group_name": group_name,
                 "terms_code": terms_code,
+                "autopay_type": normalize_autopay_type(data.get("autopay_type")) or "",
                 "overdue_count": overdue_count,
                 "overdue_amount": overdue_amount,
                 "days_overdue": days_overdue,
@@ -1979,6 +2337,9 @@ def import_recipients_from_df(df):
         net_terms_value = get_row_value(row, ["net_terms", "terms_days", "net_days"])
         terms_code = normalize_terms_code(terms_value) or normalize_terms_code(net_terms_value) or "net_30"
         net_terms = get_terms_days(terms_code)
+        autopay_type = normalize_autopay_type(get_row_value(row, ["autopay", "autopay_type"]))
+        if autopay_type is None:
+            autopay_type = ""
         location = get_row_value(row, ["location"])
         location = "" if location is None or pd.isna(location) else str(location).strip()
 
@@ -1996,15 +2357,38 @@ def import_recipients_from_df(df):
         if existing:
             cur.execute(
                 "UPDATE recipients SET email_to = ?, net_terms = ?, terms_code = ?, location = ?, frequency = ?, "
-                "day_of_week = ?, day_of_month = ?, active = ? WHERE id = ?",
-                (email_to, net_terms, terms_code, location, frequency, day_of_week, day_of_month, active, existing["id"]),
+                "day_of_week = ?, day_of_month = ?, active = ?, autopay_type = ? WHERE id = ?",
+                (
+                    email_to,
+                    net_terms,
+                    terms_code,
+                    location,
+                    frequency,
+                    day_of_week,
+                    day_of_month,
+                    active,
+                    autopay_type,
+                    existing["id"],
+                ),
             )
             updated += 1
         else:
             cur.execute(
                 "INSERT INTO recipients(group_name, email_to, net_terms, terms_code, location, frequency, day_of_week, "
-                "day_of_month, active, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (group_name, email_to, net_terms, terms_code, location, frequency, day_of_week, day_of_month, active, now),
+                "day_of_month, active, autopay_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    group_name,
+                    email_to,
+                    net_terms,
+                    terms_code,
+                    location,
+                    frequency,
+                    day_of_week,
+                    day_of_month,
+                    active,
+                    autopay_type,
+                    now,
+                ),
             )
             added += 1
 
@@ -2083,15 +2467,22 @@ def import_bulk_customers_from_upload(upload_file):
     df = load_upload_df(upload_file)
     df = normalize_columns(df)
 
-    required = {"customer_name", "terms"}
+    required = {"customer_name"}
     missing_cols = sorted(required - set(df.columns))
     if missing_cols:
         raise RuntimeError(f"Missing required columns: {', '.join(missing_cols)}")
 
+    has_terms_col = "terms" in df.columns
     has_email_col = any(col in df.columns for col in ["email_to", "email", "emails", "email_address"])
     has_frequency_col = "frequency" in df.columns
     has_dow_col = any(col in df.columns for col in ["day_of_week", "weekday"])
     has_dom_col = "day_of_month" in df.columns
+    has_autopay_col = "autopay" in df.columns
+
+    if not any([has_terms_col, has_email_col, has_frequency_col, has_dow_col, has_dom_col, has_autopay_col]):
+        raise RuntimeError(
+            "No updatable columns found. Include at least one of Terms, Email, Frequency, Day of Week, Day of Month, or Autopay."
+        )
 
     latest_keys = set()
     try:
@@ -2150,17 +2541,41 @@ def import_bulk_customers_from_upload(upload_file):
             skipped_details.append(f"Row {row_no}: customer not in New or All lists")
             continue
 
-        terms_code = normalize_terms_code(get_row_value(row, ["terms"]))
-        if not terms_code:
-            skipped += 1
-            skipped_details.append(f"Row {row_no}: invalid terms value")
-            continue
-        net_terms = get_terms_days(terms_code)
+        terms_code = None
+        net_terms = None
+        if has_terms_col:
+            raw_terms = get_row_value(row, ["terms"])
+            if raw_terms is not None and not (isinstance(raw_terms, float) and pd.isna(raw_terms)):
+                raw_terms_text = str(raw_terms).strip()
+                if raw_terms_text:
+                    terms_code = normalize_terms_code(raw_terms_text)
+                    if not terms_code:
+                        skipped += 1
+                        skipped_details.append(f"Row {row_no}: invalid terms value")
+                        continue
+                    net_terms = get_terms_days(terms_code)
+
+        autopay_type = None
+        if has_autopay_col:
+            raw_autopay = get_row_value(row, ["autopay"])
+            if raw_autopay is not None and not (isinstance(raw_autopay, float) and pd.isna(raw_autopay)):
+                raw_autopay_text = str(raw_autopay).strip()
+                if raw_autopay_text:
+                    autopay_type = normalize_autopay_type(raw_autopay_text)
+                    if autopay_type is None:
+                        skipped += 1
+                        skipped_details.append(f"Row {row_no}: invalid autopay value (use ACH or CC)")
+                        continue
 
         existing = single_by_key.get(key) or alias_lookup.get(key)
         if existing:
-            updates = ["terms_code = ?", "net_terms = ?"]
-            values = [terms_code, net_terms]
+            updates = []
+            values = []
+
+            if terms_code:
+                updates.append("terms_code = ?")
+                updates.append("net_terms = ?")
+                values.extend([terms_code, net_terms])
 
             if has_email_col:
                 email_to = normalize_email_value(
@@ -2188,6 +2603,15 @@ def import_bulk_customers_from_upload(upload_file):
                     updates.append("day_of_month = ?")
                     values.append(day_of_month)
 
+            if autopay_type is not None:
+                updates.append("autopay_type = ?")
+                values.append(autopay_type)
+
+            if not updates:
+                skipped += 1
+                skipped_details.append(f"Row {row_no}: no valid updates in row")
+                continue
+
             values.append(existing["id"])
             cur.execute(f"UPDATE recipients SET {', '.join(updates)} WHERE id = ?", values)
             updated += 1
@@ -2201,6 +2625,11 @@ def import_bulk_customers_from_upload(upload_file):
         if key not in latest_keys:
             skipped += 1
             skipped_details.append(f"Row {row_no}: new customer must exist in latest invoice file")
+            continue
+
+        if not terms_code:
+            skipped += 1
+            skipped_details.append(f"Row {row_no}: terms are required for new customers")
             continue
 
         frequency, day_of_week, day_of_month = default_schedule_for_terms(terms_code)
@@ -2223,10 +2652,21 @@ def import_bulk_customers_from_upload(upload_file):
                 get_row_value(row, ["email_to", "email", "emails", "email_address"])
             )
 
+        insert_autopay = autopay_type if autopay_type is not None else ""
         cur.execute(
-            "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, active, created_at) "
-            "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, 1, ?)",
-            (customer_name, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, now),
+            "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, frequency, day_of_week, day_of_month, active, created_at) "
+            "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            (
+                customer_name,
+                email_to,
+                net_terms,
+                terms_code,
+                insert_autopay,
+                frequency,
+                day_of_week,
+                day_of_month,
+                now,
+            ),
         )
         new_id = cur.lastrowid
         single_by_key[key] = {"id": new_id, "group_name": customer_name}
@@ -2344,26 +2784,37 @@ def generate_invoice_pdf(customer_data, output_path, terms_code):
     customer_data = customer_data.copy()
     processed_list = []
     today = datetime.today().date()
+    custom_print_ids = get_custom_print_invoice_ids()
 
     for _, row in customer_data.iterrows():
         val_total = pd.to_numeric(row.get("Order Total"), errors="coerce")
         val_paid = pd.to_numeric(row.get("Paid Amount", 0), errors="coerce")
         amt = 0.0 if pd.isna(val_total) else float(val_total)
         paid = 0.0 if pd.isna(val_paid) else float(val_paid)
+        order_id = normalize_invoice_id(row.get("Order ID"))
+        is_custom_print = bool(order_id and order_id in custom_print_ids)
 
         if amt > 0 and amt > (paid + 0.01):
             ship_date = parse_ship_date(row.get("Shipping Date"))
             row_data = row.copy()
             row_data["C_Total"] = amt
             row_data["C_Paid"] = paid
+            row_data["C_OrderID"] = order_id
+            row_data["C_IsCustomPrint"] = is_custom_print
             row_data["C_ShipDate"] = ship_date
+            if is_custom_print:
+                row_data["C_DueDate"] = None
+                row_data["C_Status"] = "Custom Print"
             processed_list.append(row_data)
 
     if not processed_list:
         return False
 
     if terms_code == "bill_to_bill":
-        sorted_rows = sorted(processed_list, key=lambda r: r["C_ShipDate"])
+        sorted_rows = sorted(
+            [row_data for row_data in processed_list if not row_data.get("C_IsCustomPrint")],
+            key=lambda r: r["C_ShipDate"],
+        )
         for idx, row_data in enumerate(sorted_rows):
             ship_date = row_data["C_ShipDate"]
             if idx < len(sorted_rows) - 1:
@@ -2374,6 +2825,8 @@ def generate_invoice_pdf(customer_data, output_path, terms_code):
             row_data["C_Status"] = compute_status(today, due_date)
     else:
         for row_data in processed_list:
+            if row_data.get("C_IsCustomPrint"):
+                continue
             ship_date = row_data["C_ShipDate"]
             due_date = compute_due_date(ship_date, terms_code)
             row_data["C_DueDate"] = due_date
@@ -2423,10 +2876,7 @@ def generate_invoice_pdf(customer_data, output_path, terms_code):
             ship_fmt = ship_date.strftime("%m/%d/%Y") if ship_date else ""
             due_fmt = due_date.strftime("%m/%d/%Y") if due_date else ""
 
-            try:
-                inv_no = str(int(float(row.get("Order ID"))))
-            except Exception:
-                inv_no = str(row.get("Order ID"))
+            inv_no = normalize_invoice_id(row.get("C_OrderID") or row.get("Order ID"))
 
             vals = [clean_text(inv_no), ship_fmt, due_fmt, f"${amt:,.2f}", f"${paid:,.2f}", status]
             for j in range(len(vals)):
@@ -3337,12 +3787,13 @@ def index():
     financials = compute_dashboard_financials()
     overdue_chart = build_pie_chart(
         [
-            ("Overdue", financials["overdue_amount"], "#d14f4f"),
             ("Current", financials["current_amount"], "#2d8a4e"),
+            ("Overdue (No Autopay)", financials["overdue_no_autopay_amount"], "#d14f4f"),
+            ("ACH Overdue", financials["overdue_ach_amount"], "#2f6fab"),
+            ("CC Overdue", financials["overdue_cc_amount"], "#7f3fbf"),
         ]
     )
 
-    terms_counts, terms_customers = get_terms_distribution(include_customers=True)
     term_color_map = {
         "net_7": "#1f77b4",
         "net_15": "#ff7f0e",
@@ -3354,6 +3805,54 @@ def index():
         "month_to_month": "#7f7f7f",
         "week_to_week": "#bcbd22",
     }
+
+    overdue_terms_non_autopay_totals = {}
+    overdue_terms_non_autopay_customers = {}
+    overdue_terms_ach_totals = {}
+    overdue_terms_ach_customers = {}
+    overdue_terms_cc_totals = {}
+    overdue_terms_cc_customers = {}
+    if not financials["error"]:
+        try:
+            _, invoice_path = get_invoice_for_run()
+            (
+                overdue_terms_non_autopay_totals,
+                overdue_terms_non_autopay_customers,
+            ) = compute_overdue_terms_breakdown(invoice_path, autopay_filter="none")
+            overdue_terms_ach_totals, overdue_terms_ach_customers = compute_overdue_terms_breakdown(
+                invoice_path, autopay_filter="ach"
+            )
+            overdue_terms_cc_totals, overdue_terms_cc_customers = compute_overdue_terms_breakdown(
+                invoice_path, autopay_filter="cc"
+            )
+        except Exception:
+            overdue_terms_non_autopay_totals = {}
+            overdue_terms_non_autopay_customers = {}
+            overdue_terms_ach_totals = {}
+            overdue_terms_ach_customers = {}
+            overdue_terms_cc_totals = {}
+            overdue_terms_cc_customers = {}
+
+    def build_overdue_terms_chart(totals):
+        segments = []
+        for code, amount in sorted(totals.items(), key=lambda item: item[1], reverse=True):
+            if amount <= 0:
+                continue
+            segments.append(
+                (
+                    code,
+                    TERM_CODE_TO_LABEL.get(code, code),
+                    float(amount),
+                    term_color_map.get(code, "#17becf"),
+                )
+            )
+        return build_svg_pie_chart(segments)
+
+    overdue_terms_non_autopay_chart = build_overdue_terms_chart(overdue_terms_non_autopay_totals)
+    overdue_terms_ach_chart = build_overdue_terms_chart(overdue_terms_ach_totals)
+    overdue_terms_cc_chart = build_overdue_terms_chart(overdue_terms_cc_totals)
+
+    terms_counts, terms_customers = get_terms_distribution(include_customers=True)
     terms_segments = []
     known_codes = [code for code, _ in TERM_OPTIONS]
     for code in known_codes:
@@ -3381,11 +3880,24 @@ def index():
         due=due,
         today=today,
         total_receivable=financials["total_receivable"],
-        total_overdue_amount=financials["overdue_amount"],
+        total_overdue_amount=(
+            financials["overdue_no_autopay_amount"]
+            + financials["overdue_ach_amount"]
+            + financials["overdue_cc_amount"]
+        ),
+        total_overdue_no_autopay_amount=financials["overdue_no_autopay_amount"],
+        total_overdue_ach_amount=financials["overdue_ach_amount"],
+        total_overdue_cc_amount=financials["overdue_cc_amount"],
         total_current_amount=financials["current_amount"],
         dashboard_invoice_label=financials["invoice_label"],
         dashboard_error=financials["error"],
         overdue_chart=overdue_chart,
+        overdue_terms_non_autopay_chart=overdue_terms_non_autopay_chart,
+        overdue_terms_non_autopay_customers=overdue_terms_non_autopay_customers,
+        overdue_terms_ach_chart=overdue_terms_ach_chart,
+        overdue_terms_ach_customers=overdue_terms_ach_customers,
+        overdue_terms_cc_chart=overdue_terms_cc_chart,
+        overdue_terms_cc_customers=overdue_terms_cc_customers,
         terms_chart=terms_chart,
         terms_customers=terms_customers,
         active_schedule_job=active_schedule_job,
@@ -3397,6 +3909,7 @@ def index():
 def overdue_report():
     today = date.today()
     run = get_latest_overdue_run()
+    active_tab = normalize_autopay_filter(request.args.get("tab"), default="none")
 
     rows = get_overdue_items(run["id"]) if run and run["status"] == "success" else []
     rows = [dict(row) for row in rows]
@@ -3409,6 +3922,11 @@ def overdue_report():
         recipient = recipients_map.get(row["group_name"])
         row["recipient_id"] = recipient["id"] if recipient else None
         row["has_email"] = bool(recipient and recipient.get("has_email"))
+        autopay_type = normalize_autopay_type(recipient.get("autopay_type") if recipient else row.get("autopay_type"))
+        if autopay_type is None:
+            autopay_type = ""
+        row["autopay_type"] = autopay_type
+        row["autopay_label"] = get_autopay_label(autopay_type)
         skipped_raw = row.get("skipped_invoices") or "[]"
         try:
             row["skipped_invoices"] = json.loads(skipped_raw)
@@ -3466,6 +3984,8 @@ def overdue_report():
         invoice_label=invoice_label,
         today=today,
         term_labels=term_labels,
+        autopay_labels=AUTOPAY_LABELS,
+        active_tab=active_tab,
         total_overdue_count=total_overdue_count,
         total_overdue_amount=total_overdue_amount,
         total_short_paid_count=total_short_paid_count,
@@ -3475,17 +3995,19 @@ def overdue_report():
 
 @app.route("/overdue-report/run", methods=["POST"])
 def overdue_report_run():
+    tab = normalize_autopay_filter(request.form.get("tab"), default="none")
     status, error = run_overdue_report()
     if status == "success":
         flash("Overdue report generated.", "success")
     else:
         flash(f"Overdue report failed: {error}", "error")
-    return redirect(url_for("overdue_report"))
+    return redirect(url_for("overdue_report", tab=tab))
 
 
 @app.route("/overdue-report/export")
 def overdue_report_export():
     run = get_latest_overdue_run()
+    tab_filter = normalize_autopay_filter(request.args.get("tab"), default="all")
 
     if not run or run["status"] != "success":
         return "No overdue report available to export.", 400
@@ -3494,13 +4016,23 @@ def overdue_report_export():
     if not rows:
         return "No overdue data to export.", 400
 
+    recipients_map = get_recipients_terms_map()
     data = []
     for row in rows:
+        recipient = recipients_map.get(row["group_name"])
+        autopay_type = normalize_autopay_type(recipient.get("autopay_type") if recipient else row.get("autopay_type"))
+        if autopay_type is None:
+            autopay_type = ""
+        if tab_filter != "all":
+            expected = "" if tab_filter == "none" else tab_filter
+            if autopay_type != expected:
+                continue
         terms_label = TERM_CODE_TO_LABEL.get(row["terms_code"], row["terms_code"])
         data.append(
             {
                 "Group": row["group_name"],
                 "Terms": terms_label,
+                "Autopay": get_autopay_label(autopay_type),
                 "Overdue Invoices": int(row["overdue_count"]),
                 "Oldest Overdue Days": int(row["days_overdue"]),
                 "Overdue Amount": float(row["overdue_amount"]),
@@ -3509,6 +4041,9 @@ def overdue_report_export():
                 "Skipped Invoices": int(row.get("skipped_count") or 0),
             }
         )
+
+    if not data:
+        return "No overdue data to export for this tab.", 400
 
     df = pd.DataFrame(data)
     output = BytesIO()
@@ -3527,6 +4062,7 @@ def overdue_report_export():
 
 @app.route("/overdue-report/send/<int:recipient_id>", methods=["POST"])
 def overdue_report_send(recipient_id):
+    tab = normalize_autopay_filter(request.form.get("tab"), default="none")
     run_id = resolve_run_id(request.form.get("run_id"))
     invoice_path = None
     invoice_file_id = None
@@ -3548,7 +4084,7 @@ def overdue_report_send(recipient_id):
         conn.close()
         if not recipient:
             flash("Recipient not found", "error")
-            return redirect(url_for("overdue_report"))
+            return redirect(url_for("overdue_report", tab=tab))
         recipient = dict(recipient)
         recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
@@ -3576,11 +4112,12 @@ def overdue_report_send(recipient_id):
     except Exception as exc:
         flash(f"Overdue notice failed: {exc}", "error")
 
-    return redirect(url_for("overdue_report"))
+    return redirect(url_for("overdue_report", tab=tab))
 
 
 @app.route("/overdue-report/follow-up/<int:recipient_id>", methods=["POST"])
 def overdue_report_follow_up(recipient_id):
+    tab = normalize_autopay_filter(request.form.get("tab"), default="none")
     run_id = resolve_run_id(request.form.get("run_id"))
     invoice_path = None
     invoice_file_id = None
@@ -3602,17 +4139,17 @@ def overdue_report_follow_up(recipient_id):
         conn.close()
         if not recipient:
             flash("Recipient not found", "error")
-            return redirect(url_for("overdue_report"))
+            return redirect(url_for("overdue_report", tab=tab))
         recipient = dict(recipient)
         recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
         thread_context = get_notice_thread_context(recipient_id)
         if not thread_context:
             flash("Send an overdue notice first, then use follow up.", "error")
-            return redirect(url_for("overdue_report"))
+            return redirect(url_for("overdue_report", tab=tab))
         if not should_show_follow_up(thread_context.get("sent_at")):
             flash("Follow up is available for 7 days after the last overdue notice.", "error")
-            return redirect(url_for("overdue_report"))
+            return redirect(url_for("overdue_report", tab=tab))
 
         output_path = build_statement_pdf(recipient, invoice_path)
         subject = build_follow_up_subject(thread_context["base_subject"])
@@ -3640,21 +4177,22 @@ def overdue_report_follow_up(recipient_id):
     except Exception as exc:
         flash(f"Follow up failed: {exc}", "error")
 
-    return redirect(url_for("overdue_report"))
+    return redirect(url_for("overdue_report", tab=tab))
 
 
 @app.route("/overdue-report/skipped/<int:recipient_id>", methods=["POST"])
 def overdue_report_skipped(recipient_id):
+    tab = normalize_autopay_filter(request.form.get("tab"), default="none")
     run_id = resolve_run_id(request.form.get("run_id"))
     invoice_ids = request.form.getlist("invoice_ids")
     uploaded_files = request.files.getlist("invoice_files")
 
     if not invoice_ids:
         flash("No skipped invoices provided.", "error")
-        return redirect(url_for("overdue_report"))
+        return redirect(url_for("overdue_report", tab=tab))
     if not uploaded_files or len(uploaded_files) != len(invoice_ids):
         flash("Please upload one PDF for each skipped invoice.", "error")
-        return redirect(url_for("overdue_report"))
+        return redirect(url_for("overdue_report", tab=tab))
 
     invoice_path = None
     invoice_file_id = None
@@ -3676,7 +4214,7 @@ def overdue_report_skipped(recipient_id):
         conn.close()
         if not recipient:
             flash("Recipient not found", "error")
-            return redirect(url_for("overdue_report"))
+            return redirect(url_for("overdue_report", tab=tab))
         recipient = dict(recipient)
         recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
@@ -3684,11 +4222,11 @@ def overdue_report_skipped(recipient_id):
         for idx, file in enumerate(uploaded_files):
             if not file or not file.filename:
                 flash("Each skipped invoice must have a PDF attached.", "error")
-                return redirect(url_for("overdue_report"))
+                return redirect(url_for("overdue_report", tab=tab))
             data = file.read()
             if not data:
                 flash("One or more uploaded files were empty.", "error")
-                return redirect(url_for("overdue_report"))
+                return redirect(url_for("overdue_report", tab=tab))
             filename = file.filename or f"invoice_{invoice_ids[idx]}.pdf"
             attachments.append(
                 {
@@ -3723,21 +4261,22 @@ def overdue_report_skipped(recipient_id):
     except Exception as exc:
         flash(f"Skipped notice failed: {exc}", "error")
 
-    return redirect(url_for("overdue_report"))
+    return redirect(url_for("overdue_report", tab=tab))
 
 
 @app.route("/overdue-report/short-paid/<int:recipient_id>", methods=["POST"])
 def overdue_report_short_paid(recipient_id):
+    tab = normalize_autopay_filter(request.form.get("tab"), default="none")
     run_id = resolve_run_id(request.form.get("run_id"))
     invoice_ids = request.form.getlist("invoice_ids")
     uploaded_files = request.files.getlist("invoice_files")
 
     if not invoice_ids:
         flash("No short-paid invoices provided.", "error")
-        return redirect(url_for("overdue_report"))
+        return redirect(url_for("overdue_report", tab=tab))
     if not uploaded_files or len(uploaded_files) != len(invoice_ids):
         flash("Please upload one PDF for each short-paid invoice.", "error")
-        return redirect(url_for("overdue_report"))
+        return redirect(url_for("overdue_report", tab=tab))
 
     invoice_path = None
     invoice_file_id = None
@@ -3759,7 +4298,7 @@ def overdue_report_short_paid(recipient_id):
         conn.close()
         if not recipient:
             flash("Recipient not found", "error")
-            return redirect(url_for("overdue_report"))
+            return redirect(url_for("overdue_report", tab=tab))
         recipient = dict(recipient)
         recipient = ensure_recipient_email(recipient, request.form.get("email_to", ""))
 
@@ -3767,11 +4306,11 @@ def overdue_report_short_paid(recipient_id):
         for idx, file in enumerate(uploaded_files):
             if not file or not file.filename:
                 flash("Each short-paid invoice must have a PDF attached.", "error")
-                return redirect(url_for("overdue_report"))
+                return redirect(url_for("overdue_report", tab=tab))
             data = file.read()
             if not data:
                 flash("One or more uploaded files were empty.", "error")
-                return redirect(url_for("overdue_report"))
+                return redirect(url_for("overdue_report", tab=tab))
             filename = file.filename or f"invoice_{invoice_ids[idx]}.pdf"
             attachments.append(
                 {
@@ -3806,7 +4345,7 @@ def overdue_report_short_paid(recipient_id):
     except Exception as exc:
         flash(f"Short paid notice failed: {exc}", "error")
 
-    return redirect(url_for("overdue_report"))
+    return redirect(url_for("overdue_report", tab=tab))
 
 
 @app.route("/customers/<int:recipient_id>/statement")
@@ -3839,6 +4378,7 @@ def customers_bulk_template():
     columns = [
         "Customer Name",
         "Terms",
+        "Autopay",
         "Email",
         "Frequency",
         "Day of Week",
@@ -3868,6 +4408,7 @@ def customers():
             email_to = normalize_email_value(request.form.get("email_to", ""))
             terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
             net_terms = get_terms_days(terms_code)
+            autopay_type = parse_autopay_from_form(request.form)
             frequency = request.form.get("frequency", "weekly")
             day_of_week = parse_int(request.form.get("day_of_week"), 0, 0, 6)
             day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
@@ -3888,9 +4429,20 @@ def customers():
                 return redirect(url_for("customers"))
 
             cur.execute(
-                "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, active, created_at) "
-                "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, ?, ?)",
-                (customer_name, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, active, now),
+                "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, frequency, day_of_week, day_of_month, active, created_at) "
+                "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    customer_name,
+                    email_to,
+                    net_terms,
+                    terms_code,
+                    autopay_type,
+                    frequency,
+                    day_of_week,
+                    day_of_month,
+                    active,
+                    now,
+                ),
             )
             conn.commit()
             conn.close()
@@ -3902,6 +4454,7 @@ def customers():
             email_to = normalize_email_value(request.form.get("email_to", ""))
             terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
             net_terms = get_terms_days(terms_code)
+            autopay_type = parse_autopay_from_form(request.form)
             frequency = request.form.get("frequency", "weekly")
             day_of_week = parse_int(request.form.get("day_of_week"), 0, 0, 6)
             day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
@@ -3922,9 +4475,20 @@ def customers():
                 return redirect(url_for("customers"))
 
             cur.execute(
-                "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, active, created_at) "
-                "VALUES (?, 'group', ?, ?, ?, ?, ?, ?, ?, ?)",
-                (group_name, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, active, now),
+                "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, frequency, day_of_week, day_of_month, active, created_at) "
+                "VALUES (?, 'group', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    group_name,
+                    email_to,
+                    net_terms,
+                    terms_code,
+                    autopay_type,
+                    frequency,
+                    day_of_week,
+                    day_of_month,
+                    active,
+                    now,
+                ),
             )
             group_id = cur.lastrowid
 
@@ -4115,6 +4679,7 @@ def customers():
         flash(f"Unable to load latest invoice file for new customers: {exc}", "error")
 
     term_labels = {code: label for code, label in TERM_OPTIONS}
+    autopay_labels = AUTOPAY_LABELS
     return render_template(
         "customers.html",
         new_customers=new_customers,
@@ -4129,6 +4694,7 @@ def customers():
         customer_groups=customer_groups,
         term_options=TERM_OPTIONS,
         term_labels=term_labels,
+        autopay_labels=autopay_labels,
         invoice_label=invoice_label,
     )
 
@@ -4171,6 +4737,7 @@ def edit_customer(recipient_id):
         email_to = normalize_email_value(request.form.get("email_to", ""))
         terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
         net_terms = get_terms_days(terms_code)
+        autopay_type = parse_autopay_from_form(request.form)
         frequency = request.form.get("frequency", "weekly")
         day_of_week = parse_int(request.form.get("day_of_week"), 0, 0, 6)
         day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
@@ -4192,8 +4759,19 @@ def edit_customer(recipient_id):
 
         cur.execute(
             "UPDATE recipients SET group_name = ?, email_to = ?, net_terms = ?, terms_code = ?, "
-            "frequency = ?, day_of_week = ?, day_of_month = ?, active = ? WHERE id = ?",
-            (group_name, email_to, net_terms, terms_code, frequency, day_of_week, day_of_month, active, recipient_id),
+            "autopay_type = ?, frequency = ?, day_of_week = ?, day_of_month = ?, active = ? WHERE id = ?",
+            (
+                group_name,
+                email_to,
+                net_terms,
+                terms_code,
+                autopay_type,
+                frequency,
+                day_of_week,
+                day_of_month,
+                active,
+                recipient_id,
+            ),
         )
 
         if recipient["recipient_type"] == "group":
@@ -4270,6 +4848,79 @@ def delete_customer(recipient_id):
 def mappings():
     flash("Mappings are now managed in Customers > Groups.", "success")
     return redirect(url_for("customers"))
+
+
+@app.route("/custom-print-invoices", methods=["GET", "POST"])
+def custom_print_invoices():
+    if request.method == "POST":
+        invoice_id = normalize_invoice_id(request.form.get("invoice_id"))
+        if not invoice_id:
+            flash("Invoice number is required.", "error")
+            return redirect(url_for("custom_print_invoices"))
+
+        conn = get_db()
+        cur = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            cur.execute(
+                "INSERT INTO custom_print_invoices(invoice_id, created_at) VALUES (?, ?)",
+                (invoice_id, now),
+            )
+            conn.commit()
+            flash(f"Added custom print invoice #{invoice_id}.", "success")
+        except sqlite3.IntegrityError:
+            flash(f"Invoice #{invoice_id} is already on the custom print list.", "success")
+        finally:
+            conn.close()
+        return redirect(url_for("custom_print_invoices"))
+
+    records = get_custom_print_invoice_records()
+    source_label = None
+    source_error = None
+    lookup = {}
+    try:
+        _, invoice_path = get_invoice_for_run()
+        source_label = os.path.basename(invoice_path)
+        lookup = build_custom_print_invoice_lookup(invoice_path)
+    except Exception as exc:
+        source_error = str(exc)
+
+    rows = []
+    for record in records:
+        invoice_id = normalize_invoice_id(record["invoice_id"])
+        details = lookup.get(invoice_id)
+        rows.append(
+            {
+                "id": record["id"],
+                "invoice_id": invoice_id,
+                "created_at": record["created_at"],
+                "customer_name": details["customer_name"] if details else "",
+                "order_date": details["order_date"] if details else "",
+                "found": bool(details),
+            }
+        )
+
+    return render_template(
+        "custom_print_invoices.html",
+        rows=rows,
+        source_label=source_label,
+        source_error=source_error,
+    )
+
+
+@app.route("/custom-print-invoices/<int:item_id>/delete", methods=["POST"])
+def custom_print_invoice_delete(item_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM custom_print_invoices WHERE id = ?", (item_id,))
+    deleted = cur.rowcount
+    conn.commit()
+    conn.close()
+    if deleted:
+        flash("Custom print invoice removed.", "success")
+    else:
+        flash("Invoice not found.", "error")
+    return redirect(url_for("custom_print_invoices"))
 
 
 @app.route("/uploads", methods=["GET", "POST"])

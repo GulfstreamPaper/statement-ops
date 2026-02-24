@@ -88,7 +88,7 @@ main {
 .stats-grid {
   display: grid;
   gap: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   align-items: start;
 }
 
@@ -130,6 +130,83 @@ main {
   display: flex;
   gap: 16px;
   align-items: center;
+}
+
+.receivable-card {
+  grid-column: span 2;
+}
+
+.receivable-card .chart-totals {
+  min-width: max-content;
+  flex: 1 1 auto;
+}
+
+.receivable-card .chart-total-value {
+  font-size: 28px;
+  overflow-wrap: anywhere;
+}
+
+.overdue-terms-chart-wrap {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.overdue-terms-pie {
+  width: 220px;
+  height: 220px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: #f2f2f2;
+  flex-shrink: 0;
+}
+
+.overdue-terms-slice {
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.overdue-terms-slice:hover {
+  opacity: 0.88;
+}
+
+.overdue-terms-pie-label {
+  font-size: 7px;
+  font-weight: 700;
+  fill: #ffffff;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+.overdue-terms-legend {
+  min-width: 230px;
+}
+
+.overdue-terms-legend li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 7px;
+}
+
+.legend-link {
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.legend-link:hover {
+  text-decoration: underline;
 }
 
 .pie-circle {
@@ -291,10 +368,25 @@ main {
 
 .chart-total-value {
   margin: 3px 0 0;
-  font-size: 30px;
+  font-size: 28px;
   font-weight: 800;
   line-height: 1;
   color: #1f2a2e;
+}
+
+@media (max-width: 1300px) {
+  .receivable-card {
+    grid-column: span 1;
+  }
+
+  .receivable-card .pie-row {
+    flex-wrap: wrap;
+  }
+
+  .receivable-card .chart-totals {
+    min-width: 0;
+    width: 100%;
+  }
 }
 
 .chart-legend {
@@ -393,6 +485,33 @@ main {
   font-size: 12px;
 }
 
+.custom-print-form {
+  align-items: end;
+}
+
+.custom-print-add-wrap {
+  display: flex;
+  align-items: end;
+}
+
+.status-pill {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+
+.status-pill.found {
+  background: #e3f6d5;
+  color: #2c5e2b;
+}
+
+.status-pill.missing {
+  background: #fff1cc;
+  color: #725100;
+}
+
 form .row {
   display: grid;
   gap: 12px;
@@ -423,6 +542,27 @@ input, select, textarea {
   border-radius: 8px;
   border: 1px solid var(--border);
   font-size: 14px;
+}
+
+.autopay-options {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.autopay-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+.autopay-option input[type="checkbox"] {
+  width: auto;
+  margin: 0;
 }
 
 button {

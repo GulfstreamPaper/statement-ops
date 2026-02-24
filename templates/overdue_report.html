@@ -13,12 +13,19 @@
       </div>
       <div>
         <form method="post" action="{{ url_for('overdue_report_run') }}">
+          <input type="hidden" name="tab" class="active-tab-input" value="{{ active_tab }}" />
           <button type="submit" class="secondary">Run Report Now</button>
         </form>
         <p style="margin-top: 8px;">
-          <a class="button-link export" href="{{ url_for('overdue_report_export') }}">Export to Excel</a>
+          <a class="button-link export" id="overdueExportLink" href="{{ url_for('overdue_report_export', tab=active_tab) }}">Export to Excel</a>
         </p>
       </div>
+    </div>
+    <div class="tabs">
+      <button class="tab overdue-tab" type="button" data-autopay-tab="none">No Autopay</button>
+      <button class="tab overdue-tab" type="button" data-autopay-tab="ach">ACH</button>
+      <button class="tab overdue-tab" type="button" data-autopay-tab="cc">CC</button>
+      <button class="tab overdue-tab" type="button" data-autopay-tab="all">All</button>
     </div>
     <div class="row">
       <div>
@@ -40,6 +47,7 @@
         <tr>
           <th class="sortable" data-sort-key="group_name">Group</th>
           <th class="sortable" data-sort-key="terms">Terms</th>
+          <th class="sortable" data-sort-key="autopay">Autopay</th>
           <th class="sortable" data-sort-key="overdue_count">Overdue Invoices</th>
           <th class="sortable" data-sort-key="days_overdue">Oldest Overdue (days)</th>
           <th class="sortable" data-sort-key="overdue_amount">Overdue Amount</th>
@@ -52,9 +60,10 @@
       </thead>
       <tbody>
         {% for row in rows %}
-          <tr data-search="{{ row['group_name'] | lower }}" data-terms="{{ row['terms_code'] }}">
+          <tr data-search="{{ row['group_name'] | lower }}" data-terms="{{ row['terms_code'] }}" data-autopay="{{ row['autopay_type'] or '' }}">
             <td>{{ row['group_name'] }}</td>
             <td>{{ term_labels.get(row['terms_code'], row['terms_code']) }}</td>
+            <td>{{ row['autopay_label'] }}</td>
             <td>{{ row['overdue_count'] }}</td>
             <td>{{ row['days_overdue'] }}</td>
             <td>${{ "{:,.2f}".format(row['overdue_amount']) }}</td>
@@ -69,12 +78,14 @@
                   {% if row['follow_up_active'] %}
                     <form method="post" action="{{ url_for('overdue_report_follow_up', recipient_id=row['recipient_id']) }}" class="overdue-form" data-recipient-id="{{ row['recipient_id'] }}" data-has-email="{{ '1' if row['has_email'] else '0' }}" data-group-name="{{ row['group_name'] }}">
                       <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
+                      <input type="hidden" name="tab" class="active-tab-input" value="{{ active_tab }}" />
                       <input type="hidden" name="email_to" class="email-override-input" value="" />
                       <button type="submit" class="follow-up {% if row['sent_follow_up'] %}sent{% endif %}">Follow Up</button>
                     </form>
                   {% else %}
                     <form method="post" action="{{ url_for('overdue_report_send', recipient_id=row['recipient_id']) }}" class="overdue-form" data-recipient-id="{{ row['recipient_id'] }}" data-has-email="{{ '1' if row['has_email'] else '0' }}" data-group-name="{{ row['group_name'] }}">
                       <input type="hidden" name="run_id" value="{{ run['id'] if run else '' }}" />
+                      <input type="hidden" name="tab" class="active-tab-input" value="{{ active_tab }}" />
                       <input type="hidden" name="email_to" class="email-override-input" value="" />
                       <button type="submit" class="warning">Overdue</button>
                     </form>
@@ -106,17 +117,18 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="10">No overdue, skipped, or short-paid groups found.</td></tr>
+          <tr><td colspan="11">No overdue, skipped, or short-paid groups found.</td></tr>
         {% endfor %}
       </tbody>
       <tfoot>
         <tr>
           <th colspan="2">Totals</th>
-          <th>{{ total_overdue_count }}</th>
+          <th></th>
+          <th id="overdueTotalCount">{{ total_overdue_count }}</th>
           <th>-</th>
-          <th>${{ "{:,.2f}".format(total_overdue_amount) }}</th>
-          <th>{{ total_short_paid_count }}</th>
-          <th>${{ "{:,.2f}".format(total_short_paid_amount) }}</th>
+          <th id="overdueTotalAmount">${{ "{:,.2f}".format(total_overdue_amount) }}</th>
+          <th id="shortPaidTotalCount">{{ total_short_paid_count }}</th>
+          <th id="shortPaidTotalAmount">${{ "{:,.2f}".format(total_short_paid_amount) }}</th>
           <th></th>
           <th></th>
           <th></th>
@@ -131,6 +143,7 @@
       <h3>Send Skipped Notice</h3>
       <form id="skippedForm" method="post" enctype="multipart/form-data">
         <input type="hidden" name="run_id" id="skippedRunId" value="" />
+        <input type="hidden" name="tab" id="skippedTab" class="active-tab-input" value="{{ active_tab }}" />
         <input type="hidden" name="email_to" id="skippedEmailTo" value="" />
         <div id="skippedFiles"></div>
         <div class="actions">
@@ -146,6 +159,7 @@
       <h3>Send Short Paid Notice</h3>
       <form id="shortPaidForm" method="post" enctype="multipart/form-data">
         <input type="hidden" name="run_id" id="shortPaidRunId" value="" />
+        <input type="hidden" name="tab" id="shortPaidTab" class="active-tab-input" value="{{ active_tab }}" />
         <input type="hidden" name="email_to" id="shortPaidEmailTo" value="" />
         <div id="shortPaidFiles"></div>
         <div class="actions">
@@ -426,6 +440,16 @@
     const overdueTable = document.querySelector('table.table');
     const overdueTbody = overdueTable.querySelector('tbody');
     const sortableHeaders = overdueTable.querySelectorAll('th.sortable');
+    const overdueTabs = document.querySelectorAll('.overdue-tab');
+    const activeTabInputs = document.querySelectorAll('.active-tab-input');
+    const overdueExportLink = document.getElementById('overdueExportLink');
+    const overdueTotalCountEl = document.getElementById('overdueTotalCount');
+    const overdueTotalAmountEl = document.getElementById('overdueTotalAmount');
+    const shortPaidTotalCountEl = document.getElementById('shortPaidTotalCount');
+    const shortPaidTotalAmountEl = document.getElementById('shortPaidTotalAmount');
+
+    const initialTab = "{{ active_tab }}";
+    let activeAutopayTab = ['none', 'ach', 'cc', 'all'].includes(initialTab) ? initialTab : 'none';
     let sortKey = '';
     let sortDirection = 'asc';
 
@@ -442,12 +466,13 @@
       const cells = row.cells;
       if (key === 'group_name') return (cells[0]?.textContent || '').trim().toLowerCase();
       if (key === 'terms') return (cells[1]?.textContent || '').trim().toLowerCase();
-      if (key === 'overdue_count') return parseNumber(cells[2]?.textContent);
-      if (key === 'days_overdue') return parseNumber(cells[3]?.textContent);
-      if (key === 'overdue_amount') return parseNumber(cells[4]?.textContent);
-      if (key === 'short_paid_count') return parseNumber(cells[5]?.textContent);
-      if (key === 'short_paid_amount') return parseNumber(cells[6]?.textContent);
-      if (key === 'skipped_count') return parseNumber(cells[7]?.textContent);
+      if (key === 'autopay') return (cells[2]?.textContent || '').trim().toLowerCase();
+      if (key === 'overdue_count') return parseNumber(cells[3]?.textContent);
+      if (key === 'days_overdue') return parseNumber(cells[4]?.textContent);
+      if (key === 'overdue_amount') return parseNumber(cells[5]?.textContent);
+      if (key === 'short_paid_count') return parseNumber(cells[6]?.textContent);
+      if (key === 'short_paid_amount') return parseNumber(cells[7]?.textContent);
+      if (key === 'skipped_count') return parseNumber(cells[8]?.textContent);
       return '';
     }
 
@@ -483,14 +508,66 @@
       });
     }
 
+    function setActiveAutopayTab(tabValue) {
+      const allowed = ['none', 'ach', 'cc', 'all'];
+      activeAutopayTab = allowed.includes(tabValue) ? tabValue : 'none';
+      overdueTabs.forEach((button) => {
+        button.classList.toggle('active', button.dataset.autopayTab === activeAutopayTab);
+      });
+      activeTabInputs.forEach((input) => {
+        input.value = activeAutopayTab;
+      });
+      if (overdueExportLink) {
+        overdueExportLink.href = `{{ url_for('overdue_report_export') }}?tab=${encodeURIComponent(activeAutopayTab)}`;
+      }
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.set('tab', activeAutopayTab);
+      window.history.replaceState({}, '', currentUrl.toString());
+    }
+
+    function matchesAutopayTab(row) {
+      if (activeAutopayTab === 'all') {
+        return true;
+      }
+      const rowAutopay = (row.dataset.autopay || '').toLowerCase();
+      if (activeAutopayTab === 'none') {
+        return rowAutopay === '';
+      }
+      return rowAutopay === activeAutopayTab;
+    }
+
     function filterOverdue() {
       const query = (overdueSearch.value || '').toLowerCase();
       const terms = overdueTerms.value;
       getOverdueRows().forEach((row) => {
         const matchesText = row.dataset.search.includes(query);
         const matchesTerms = !terms || row.dataset.terms === terms;
-        row.style.display = matchesText && matchesTerms ? '' : 'none';
+        const matchesTab = matchesAutopayTab(row);
+        row.style.display = matchesText && matchesTerms && matchesTab ? '' : 'none';
       });
+      updateVisibleTotals();
+    }
+
+    function updateVisibleTotals() {
+      let overdueCount = 0;
+      let overdueAmount = 0;
+      let shortPaidCount = 0;
+      let shortPaidAmount = 0;
+
+      getOverdueRows().forEach((row) => {
+        if (row.style.display === 'none') {
+          return;
+        }
+        overdueCount += parseNumber(row.cells[3]?.textContent);
+        overdueAmount += parseNumber(row.cells[5]?.textContent);
+        shortPaidCount += parseNumber(row.cells[6]?.textContent);
+        shortPaidAmount += parseNumber(row.cells[7]?.textContent);
+      });
+
+      if (overdueTotalCountEl) overdueTotalCountEl.textContent = String(overdueCount);
+      if (overdueTotalAmountEl) overdueTotalAmountEl.textContent = `$${overdueAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      if (shortPaidTotalCountEl) shortPaidTotalCountEl.textContent = String(shortPaidCount);
+      if (shortPaidTotalAmountEl) shortPaidTotalAmountEl.textContent = `$${shortPaidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
     }
 
     sortableHeaders.forEach((header) => {
@@ -511,8 +588,16 @@
       });
     });
 
+    overdueTabs.forEach((button) => {
+      button.addEventListener('click', () => {
+        setActiveAutopayTab(button.dataset.autopayTab || 'none');
+        filterOverdue();
+      });
+    });
+
     overdueSearch.addEventListener('input', filterOverdue);
     overdueTerms.addEventListener('change', filterOverdue);
+    setActiveAutopayTab(activeAutopayTab);
     sortKey = 'overdue_amount';
     sortDirection = 'desc';
     applyOverdueSort();

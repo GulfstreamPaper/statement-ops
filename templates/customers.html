@@ -20,7 +20,7 @@
     {% endif %}
     <div class="row">
       <div>
-        <p><small>Bulk Update (Excel): Customer Name, Terms, Email, Frequency, Day of Week, Day of Month.</small></p>
+        <p><small>Bulk Update (Excel): Customer Name, Terms, Autopay, Email, Frequency, Day of Week, Day of Month.</small></p>
         <p><a class="button-link" href="{{ url_for('customers_bulk_template') }}">Download Bulk Template</a></p>
         <form method="post" enctype="multipart/form-data" class="inline-upload">
           <input type="hidden" name="form_type" value="bulk_update" />
@@ -109,6 +109,13 @@
           <input name="day_of_month" type="number" value="1" min="1" max="28" />
         </div>
         <div>
+          <label>Autopay</label>
+          <div class="autopay-options" data-autopay-group>
+            <label class="autopay-option"><input type="checkbox" name="autopay_ach" /> ACH</label>
+            <label class="autopay-option"><input type="checkbox" name="autopay_cc" /> CC</label>
+          </div>
+        </div>
+        <div>
           <label>Active</label>
           <input name="active" type="checkbox" checked />
         </div>
@@ -158,6 +165,7 @@
           <th>Members</th>
           <th>Email</th>
           <th>Terms</th>
+          <th>Autopay</th>
           <th>Frequency</th>
           <th>Actions</th>
         </tr>
@@ -172,6 +180,7 @@
             </td>
             <td>{{ g['email_to'] }}</td>
             <td>{{ term_labels.get(g['terms_code'], g['terms_code']) }}</td>
+            <td>{{ autopay_labels.get(g['autopay_type'] or '', 'None') }}</td>
             <td>{{ g['frequency'] }}</td>
             <td class="actions">
               <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=g['id']) }}">Download</a>
@@ -182,7 +191,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="6">No groups yet.</td></tr>
+          <tr><td colspan="7">No groups yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -203,6 +212,7 @@
           <th>Name</th>
           <th>Email</th>
           <th>Terms</th>
+          <th>Autopay</th>
           <th>Frequency</th>
           <th>Actions</th>
         </tr>
@@ -213,6 +223,7 @@
             <td>{{ r['group_name'] }}</td>
             <td>{{ r['email_to'] }}</td>
             <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
+            <td>{{ autopay_labels.get(r['autopay_type'] or '', 'None') }}</td>
             <td>{{ r['frequency'] }}</td>
             <td class="actions">
               <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
@@ -224,7 +235,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="5">No single customers outside groups.</td></tr>
+          <tr><td colspan="6">No single customers outside groups.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -254,6 +265,7 @@
           <th>Type</th>
           <th>Email</th>
           <th>Terms</th>
+          <th>Autopay</th>
           <th>Frequency</th>
           <th>Group / Members</th>
           <th>Actions</th>
@@ -266,6 +278,7 @@
             <td>{{ 'Group' if r['recipient_type'] == 'group' else 'Single' }}</td>
             <td>{{ r['email_to'] }}</td>
             <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
+            <td>{{ autopay_labels.get(r['autopay_type'] or '', 'None') }}</td>
             <td>{{ r['frequency'] }}</td>
             <td>
               {% if r['recipient_type'] == 'group' %}
@@ -286,7 +299,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="7">No customers yet.</td></tr>
+          <tr><td colspan="8">No customers yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -301,6 +314,7 @@
           <th>Type</th>
           <th>Email</th>
           <th>Terms</th>
+          <th>Autopay</th>
           <th>Frequency</th>
           <th>Actions</th>
         </tr>
@@ -312,6 +326,7 @@
             <td>{{ 'Group' if r['recipient_type'] == 'group' else 'Single' }}</td>
             <td>{{ r['email_to'] }}</td>
             <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
+            <td>{{ autopay_labels.get(r['autopay_type'] or '', 'None') }}</td>
             <td>{{ r['frequency'] }}</td>
             <td class="actions">
               <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
@@ -325,7 +340,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="6">No inactive customers.</td></tr>
+          <tr><td colspan="7">No inactive customers.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -379,6 +394,13 @@
           <div>
             <label>Day of Month (for monthly)</label>
             <input name="day_of_month" type="number" value="1" min="1" max="28" />
+          </div>
+          <div>
+            <label>Autopay</label>
+            <div class="autopay-options" data-autopay-group>
+              <label class="autopay-option"><input type="checkbox" name="autopay_ach" /> ACH</label>
+              <label class="autopay-option"><input type="checkbox" name="autopay_cc" /> CC</label>
+            </div>
           </div>
           <div>
             <label>Active</label>
@@ -593,6 +615,26 @@
     filterGroups();
     filterSingles();
     filterAll();
+
+    function bindAutopaySingleSelect() {
+      document.querySelectorAll('[data-autopay-group]').forEach((group) => {
+        const checkboxes = Array.from(group.querySelectorAll('input[type="checkbox"]'));
+        checkboxes.forEach((checkbox) => {
+          checkbox.addEventListener('change', () => {
+            if (!checkbox.checked) {
+              return;
+            }
+            checkboxes.forEach((other) => {
+              if (other !== checkbox) {
+                other.checked = false;
+              }
+            });
+          });
+        });
+      });
+    }
+
+    bindAutopaySingleSelect();
 
     document.querySelectorAll('form').forEach((form) => {
       form.addEventListener('submit', savePageState);
