@@ -4297,8 +4297,29 @@ def get_recent_scheduled_jobs(limit=10):
         processed = int(job.get("processed_items") or 0)
         job["progress_pct"] = round((processed / total) * 100, 1) if total > 0 else 0.0
         job["missing_email_customers"] = parse_json_list(job.get("missing_email_customers"))
+        job["missing_email_count"] = len(job["missing_email_customers"])
         jobs.append(job)
     return jobs
+
+
+def get_scheduled_job_with_items(job_id):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (job_id,))
+    job_row = cur.fetchone()
+    if not job_row:
+        conn.close()
+        return None, []
+    cur.execute(
+        "SELECT * FROM scheduled_job_items WHERE job_id = ? ORDER BY id ASC",
+        (job_id,),
+    )
+    item_rows = cur.fetchall()
+    conn.close()
+    job = dict(job_row)
+    job["missing_email_customers"] = parse_json_list(job.get("missing_email_customers"))
+    job["missing_email_count"] = len(job["missing_email_customers"])
+    return job, [dict(row) for row in item_rows]
 
 
 def create_scheduled_job(requested_by="system"):
@@ -4921,6 +4942,64 @@ def index():
         active_schedule_job=active_schedule_job,
         schedule_jobs=schedule_jobs,
         **dashboard_payload,
+    )
+
+
+@app.route("/scheduled-jobs/<int:job_id>/export")
+def export_scheduled_job(job_id):
+    job, items = get_scheduled_job_with_items(job_id)
+    if not job:
+        return "Scheduled job not found.", 404
+
+    summary_row = {
+        "Job ID": job["id"],
+        "Status": job.get("status") or "",
+        "Requested By": job.get("requested_by") or "",
+        "Created": job.get("created_at") or "",
+        "Started": job.get("started_at") or "",
+        "Finished": job.get("finished_at") or "",
+        "Total Items": int(job.get("total_items") or 0),
+        "Processed": int(job.get("processed_items") or 0),
+        "Sent": int(job.get("sent_count") or 0),
+        "Skipped": int(job.get("skipped_count") or 0),
+        "Failed": int(job.get("failed_count") or 0),
+        "Missing Email Count": int(job.get("missing_email_count") or 0),
+        "Missing Email Customers": ", ".join(job.get("missing_email_customers") or []),
+        "Run Reason": job.get("error") or "",
+    }
+
+    all_rows = []
+    issues_rows = []
+    for item in items:
+        row = {
+            "Job ID": job["id"],
+            "Item ID": item.get("id"),
+            "Recipient ID": item.get("recipient_id"),
+            "Recipient Name": item.get("recipient_name") or "",
+            "Status": item.get("status") or "",
+            "Attempts": int(item.get("attempts") or 0),
+            "Created": item.get("created_at") or "",
+            "Started": item.get("started_at") or "",
+            "Finished": item.get("finished_at") or "",
+            "Reason": item.get("error") or "",
+        }
+        all_rows.append(row)
+        if row["Status"] in {"skipped", "failed"}:
+            issues_rows.append(row)
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame([summary_row]).to_excel(writer, index=False, sheet_name="summary")
+        pd.DataFrame(all_rows).to_excel(writer, index=False, sheet_name="all_items")
+        pd.DataFrame(issues_rows).to_excel(writer, index=False, sheet_name="issues")
+    output.seek(0)
+
+    filename = f"scheduled_job_{job_id}_report_{get_business_date().strftime('%Y%m%d')}.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
 

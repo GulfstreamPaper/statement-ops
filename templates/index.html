@@ -303,6 +303,7 @@
           <th>Failed</th>
           <th>Missing Email</th>
           <th>Reason</th>
+          <th>Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -317,17 +318,14 @@
             <td>{{ job['sent_count'] }}</td>
             <td>{{ job['skipped_count'] }}</td>
             <td>{{ job['failed_count'] }}</td>
-            <td>
-              {% if job['missing_email_customers'] %}
-                {{ job['missing_email_customers'] | join(', ') }}
-              {% else %}
-                -
-              {% endif %}
-            </td>
+            <td>{{ job['missing_email_count'] }}</td>
             <td>{{ job['error'] or '-' }}</td>
+            <td class="actions">
+              <a class="button-link" href="{{ url_for('export_scheduled_job', job_id=job['id']) }}">Export</a>
+            </td>
           </tr>
         {% else %}
-          <tr><td colspan="11">No scheduled jobs yet.</td></tr>
+          <tr><td colspan="12">No scheduled jobs yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
