@@ -88,8 +88,14 @@ main {
 .stats-grid {
   display: grid;
   gap: 14px;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: start;
+}
+
+@media (max-width: 1200px) {
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .kpi-card,
@@ -403,12 +409,268 @@ main {
   margin-bottom: 5px;
 }
 
+.retention-chart-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #faf8f2;
+  padding: 12px;
+}
+
+.retention-two-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+@media (max-width: 1200px) {
+  .retention-two-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.retention-chart-wrap {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 8px;
+  overflow-x: auto;
+}
+
+#retentionLineChart {
+  width: 100%;
+  min-width: 820px;
+  height: auto;
+  display: block;
+}
+
+.retention-grid {
+  stroke: #e8e3d8;
+  stroke-width: 1;
+}
+
+.retention-axis {
+  stroke: #80909a;
+  stroke-width: 1.2;
+}
+
+.retention-axis-text {
+  fill: #55646d;
+  font-size: 12px;
+}
+
+.retention-axis-month {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.retention-line {
+  fill: none;
+  stroke-width: 3;
+}
+
+.retention-line-active {
+  stroke: #1f77b4;
+}
+
+.retention-line-new {
+  stroke: #d97706;
+}
+
+.retention-line-avg {
+  stroke: #2d8a4e;
+}
+
+.retention-line-lost {
+  stroke: #b42318;
+}
+
+.retention-point {
+  stroke-width: 2;
+  transition: stroke-width 0.12s ease, filter 0.12s ease;
+}
+
+.retention-point-hover {
+  stroke-width: 3.5;
+  filter: drop-shadow(0 0 4px rgba(0, 0, 0, 0.25));
+}
+
+.retention-point-hit {
+  fill: transparent;
+}
+
+.retention-point-active {
+  fill: #ffffff;
+  stroke: #1f77b4;
+}
+
+.retention-point-new {
+  fill: #ffffff;
+  stroke: #d97706;
+}
+
+.retention-point-avg {
+  fill: #ffffff;
+  stroke: #2d8a4e;
+}
+
+.retention-point-lost {
+  fill: #ffffff;
+  stroke: #b42318;
+}
+
+.retention-tooltip {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+  background: #1f2a2e;
+  color: #ffffff;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.retention-tooltip.active {
+  opacity: 1;
+}
+
+.retention-legend {
+  margin-top: 10px;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.retention-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.retention-swatch {
+  width: 14px;
+  height: 4px;
+  border-radius: 3px;
+  display: inline-block;
+}
+
+.retention-swatch.active {
+  background: #1f77b4;
+}
+
+.retention-swatch.new {
+  background: #d97706;
+}
+
+.retention-empty {
+  fill: #6b7780;
+  font-size: 14px;
+}
+
+.retention-sales-filter {
+  margin-bottom: 10px;
+}
+
+.retention-sales-filter label {
+  font-weight: 600;
+}
+
+.retention-sales-table-wrap {
+  overflow: visible;
+}
+
+.retention-sales-table {
+  width: 100%;
+  min-width: 0;
+}
+
+.retention-sales-table th,
+.retention-sales-table td {
+  vertical-align: middle;
+}
+
+.retention-sales-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  background: #eae5d9;
+  box-shadow: inset 0 -1px 0 #b2a899;
+}
+
+.retention-sales-table tbody td {
+  border-bottom: 1px solid #b2a899;
+}
+
+.retention-sales-table th.retention-sales-month-header {
+  text-align: center;
+}
+
+.retention-sales-month-cell {
+  padding: 0;
+}
+
+.retention-sales-month-split {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  min-height: 58px;
+}
+
+.retention-sales-month-split > div {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 6px;
+}
+
+.retention-sales-orders {
+  border-bottom: 1px solid var(--border);
+  font-weight: 700;
+  color: #1f2a2e;
+}
+
+.retention-sales-amount {
+  font-weight: 400;
+  color: #6f7578;
+}
+
+.retention-sales-month-cell.drop-alert {
+  background: #ffe6d8;
+}
+
 .legend-dot {
   width: 11px;
   height: 11px;
   border-radius: 3px;
   display: inline-block;
   border: 1px solid rgba(0, 0, 0, 0.1);
+}
+
+.responsible-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.responsible-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.responsible-picker select {
+  min-width: 150px;
+}
+
+.responsible-form {
+  margin: 0;
 }
 
 .table {

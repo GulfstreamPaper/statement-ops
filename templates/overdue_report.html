@@ -48,6 +48,9 @@
           <th class="sortable" data-sort-key="group_name">Group</th>
           <th class="sortable" data-sort-key="terms">Terms</th>
           <th class="sortable" data-sort-key="autopay">Autopay</th>
+          {% if show_responsible_column %}
+            <th class="sortable" data-sort-key="responsible">Responsible</th>
+          {% endif %}
           <th class="sortable" data-sort-key="overdue_count">Overdue Invoices</th>
           <th class="sortable" data-sort-key="days_overdue">Oldest Overdue (days)</th>
           <th class="sortable" data-sort-key="overdue_amount">Overdue Amount</th>
@@ -64,6 +67,26 @@
             <td>{{ row['group_name'] }}</td>
             <td>{{ term_labels.get(row['terms_code'], row['terms_code']) }}</td>
             <td>{{ row['autopay_label'] }}</td>
+            {% if show_responsible_column %}
+              <td>
+                {% if row['recipient_id'] %}
+                  <form method="post" action="{{ url_for('overdue_report_assign_responsible', recipient_id=row['recipient_id']) }}" class="responsible-form">
+                    <input type="hidden" name="tab" class="active-tab-input" value="{{ active_tab }}" />
+                    <div class="responsible-picker">
+                      <span class="responsible-dot" style="background: {{ row['responsible_color'] or '#b7bec4' }};"></span>
+                      <select name="responsible_id" class="responsible-select">
+                        <option value="" {% if not row['responsible_id'] %}selected{% endif %}>No responsible</option>
+                        {% for person in responsibles %}
+                          <option value="{{ person['id'] }}" {% if row['responsible_id'] == person['id'] %}selected{% endif %}>{{ person['name'] }}</option>
+                        {% endfor %}
+                      </select>
+                    </div>
+                  </form>
+                {% else %}
+                  <small>No responsible</small>
+                {% endif %}
+              </td>
+            {% endif %}
             <td>{{ row['overdue_count'] }}</td>
             <td>{{ row['days_overdue'] }}</td>
             <td>${{ "{:,.2f}".format(row['overdue_amount']) }}</td>
@@ -117,13 +140,16 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="11">No overdue, skipped, or short-paid groups found.</td></tr>
+          <tr><td colspan="{% if show_responsible_column %}12{% else %}11{% endif %}">No overdue, skipped, or short-paid groups found.</td></tr>
         {% endfor %}
       </tbody>
       <tfoot>
         <tr>
           <th colspan="2">Totals</th>
           <th></th>
+          {% if show_responsible_column %}
+            <th></th>
+          {% endif %}
           <th id="overdueTotalCount">{{ total_overdue_count }}</th>
           <th>-</th>
           <th id="overdueTotalAmount">${{ "{:,.2f}".format(total_overdue_amount) }}</th>
@@ -447,6 +473,11 @@
     const overdueTotalAmountEl = document.getElementById('overdueTotalAmount');
     const shortPaidTotalCountEl = document.getElementById('shortPaidTotalCount');
     const shortPaidTotalAmountEl = document.getElementById('shortPaidTotalAmount');
+    const hasResponsibleColumn = {{ 'true' if show_responsible_column else 'false' }};
+
+    const overdueColumns = hasResponsibleColumn
+      ? { group: 0, terms: 1, autopay: 2, responsible: 3, overdueCount: 4, daysOverdue: 5, overdueAmount: 6, shortPaidCount: 7, shortPaidAmount: 8, skippedCount: 9 }
+      : { group: 0, terms: 1, autopay: 2, overdueCount: 3, daysOverdue: 4, overdueAmount: 5, shortPaidCount: 6, shortPaidAmount: 7, skippedCount: 8 };
 
     const initialTab = "{{ active_tab }}";
     let activeAutopayTab = ['none', 'ach', 'cc', 'all'].includes(initialTab) ? initialTab : 'none';
@@ -462,17 +493,29 @@
       return Number.isFinite(parsed) ? parsed : 0;
     }
 
+    function getResponsibleSortText(row) {
+      if (!hasResponsibleColumn) return '';
+      const td = row.cells[overdueColumns.responsible];
+      if (!td) return '';
+      const select = td.querySelector('select');
+      if (select && select.selectedOptions && select.selectedOptions.length) {
+        return (select.selectedOptions[0].textContent || '').trim().toLowerCase();
+      }
+      return (td.textContent || '').trim().toLowerCase();
+    }
+
     function getSortValue(row, key) {
       const cells = row.cells;
-      if (key === 'group_name') return (cells[0]?.textContent || '').trim().toLowerCase();
-      if (key === 'terms') return (cells[1]?.textContent || '').trim().toLowerCase();
-      if (key === 'autopay') return (cells[2]?.textContent || '').trim().toLowerCase();
-      if (key === 'overdue_count') return parseNumber(cells[3]?.textContent);
-      if (key === 'days_overdue') return parseNumber(cells[4]?.textContent);
-      if (key === 'overdue_amount') return parseNumber(cells[5]?.textContent);
-      if (key === 'short_paid_count') return parseNumber(cells[6]?.textContent);
-      if (key === 'short_paid_amount') return parseNumber(cells[7]?.textContent);
-      if (key === 'skipped_count') return parseNumber(cells[8]?.textContent);
+      if (key === 'group_name') return (cells[overdueColumns.group]?.textContent || '').trim().toLowerCase();
+      if (key === 'terms') return (cells[overdueColumns.terms]?.textContent || '').trim().toLowerCase();
+      if (key === 'autopay') return (cells[overdueColumns.autopay]?.textContent || '').trim().toLowerCase();
+      if (key === 'responsible') return getResponsibleSortText(row);
+      if (key === 'overdue_count') return parseNumber(cells[overdueColumns.overdueCount]?.textContent);
+      if (key === 'days_overdue') return parseNumber(cells[overdueColumns.daysOverdue]?.textContent);
+      if (key === 'overdue_amount') return parseNumber(cells[overdueColumns.overdueAmount]?.textContent);
+      if (key === 'short_paid_count') return parseNumber(cells[overdueColumns.shortPaidCount]?.textContent);
+      if (key === 'short_paid_amount') return parseNumber(cells[overdueColumns.shortPaidAmount]?.textContent);
+      if (key === 'skipped_count') return parseNumber(cells[overdueColumns.skippedCount]?.textContent);
       return '';
     }
 
@@ -558,10 +601,10 @@
         if (row.style.display === 'none') {
           return;
         }
-        overdueCount += parseNumber(row.cells[3]?.textContent);
-        overdueAmount += parseNumber(row.cells[5]?.textContent);
-        shortPaidCount += parseNumber(row.cells[6]?.textContent);
-        shortPaidAmount += parseNumber(row.cells[7]?.textContent);
+        overdueCount += parseNumber(row.cells[overdueColumns.overdueCount]?.textContent);
+        overdueAmount += parseNumber(row.cells[overdueColumns.overdueAmount]?.textContent);
+        shortPaidCount += parseNumber(row.cells[overdueColumns.shortPaidCount]?.textContent);
+        shortPaidAmount += parseNumber(row.cells[overdueColumns.shortPaidAmount]?.textContent);
       });
 
       if (overdueTotalCountEl) overdueTotalCountEl.textContent = String(overdueCount);
@@ -592,6 +635,14 @@
       button.addEventListener('click', () => {
         setActiveAutopayTab(button.dataset.autopayTab || 'none');
         filterOverdue();
+      });
+    });
+
+    document.querySelectorAll('.responsible-select').forEach((select) => {
+      select.addEventListener('change', () => {
+        if (select.form) {
+          select.form.submit();
+        }
       });
     });
 

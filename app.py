@@ -60,6 +60,24 @@ AUTOPAY_LABELS = {
     "ach": "ACH",
     "cc": "CC",
 }
+RESPONSIBLE_COLOR_PALETTE = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+    "#1b9e77",
+    "#d95f02",
+    "#7570b3",
+    "#e7298a",
+    "#66a61e",
+    "#e6ab02",
+]
 EMAIL_TEMPLATE_DEFAULTS = {
     "statement": (
         "Dear Customer,\n\n"
@@ -107,6 +125,8 @@ UTC_TZ = ZoneInfo("UTC")
 DASHBOARD_CACHE_KEY = "dashboard_main"
 DASHBOARD_CACHE_VERSION = 1
 DASHBOARD_CACHE_LOCK = threading.Lock()
+RETENTION_CACHE_LOCK = threading.Lock()
+RETENTION_CACHE_VERSION = 4
 
 
 def ensure_storage():
@@ -144,6 +164,7 @@ def init_db():
             net_terms INTEGER DEFAULT 30,
             terms_code TEXT DEFAULT 'net_30',
             autopay_type TEXT DEFAULT '',
+            sales_representative TEXT DEFAULT '',
             location TEXT,
             frequency TEXT DEFAULT 'weekly',
             day_of_week INTEGER DEFAULT 0,
@@ -306,6 +327,46 @@ def init_db():
             payload_json TEXT NOT NULL,
             computed_at TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS customer_retention_monthly_cache (
+            month_key TEXT PRIMARY KEY,
+            active_count INTEGER NOT NULL,
+            new_count INTEGER NOT NULL,
+            new_customers_json TEXT NOT NULL,
+            avg_customer_volume REAL DEFAULT 0,
+            lost_count INTEGER DEFAULT 0,
+            lost_customers_json TEXT NOT NULL DEFAULT '[]',
+            invoice_file_id INTEGER,
+            invoice_path TEXT,
+            invoice_mtime REAL,
+            invoice_size INTEGER,
+            cache_version INTEGER DEFAULT 1,
+            computed_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS sales_representatives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS responsibles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            color TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS responsible_assignment_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            recipient_id INTEGER NOT NULL,
+            old_responsible_id INTEGER,
+            new_responsible_id INTEGER,
+            changed_at TEXT NOT NULL,
+            changed_by TEXT,
+            source TEXT,
+            FOREIGN KEY(recipient_id) REFERENCES recipients(id)
+        );
         """
     )
     cur.execute("PRAGMA table_info(recipients)")
@@ -317,6 +378,28 @@ def init_db():
     if "autopay_type" not in cols:
         cur.execute("ALTER TABLE recipients ADD COLUMN autopay_type TEXT DEFAULT ''")
     cur.execute("UPDATE recipients SET autopay_type = '' WHERE autopay_type IS NULL")
+    if "sales_representative" not in cols:
+        cur.execute("ALTER TABLE recipients ADD COLUMN sales_representative TEXT DEFAULT ''")
+    cur.execute("UPDATE recipients SET sales_representative = '' WHERE sales_representative IS NULL")
+    if "responsible_id" not in cols:
+        cur.execute("ALTER TABLE recipients ADD COLUMN responsible_id INTEGER")
+
+    cur.execute(
+        "SELECT DISTINCT TRIM(sales_representative) AS sales_representative "
+        "FROM recipients "
+        "WHERE TRIM(COALESCE(sales_representative, '')) <> ''"
+    )
+    existing_sales_representatives = [
+        " ".join(str(row["sales_representative"]).strip().split())
+        for row in cur.fetchall()
+        if row["sales_representative"] is not None and str(row["sales_representative"]).strip()
+    ]
+    if existing_sales_representatives:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cur.executemany(
+            "INSERT OR IGNORE INTO sales_representatives(name, created_at) VALUES (?, ?)",
+            [(name, now) for name in existing_sales_representatives],
+        )
 
     cur.execute("SELECT id, net_terms, terms_code FROM recipients")
     rows = cur.fetchall()
@@ -419,6 +502,34 @@ def init_db():
         cur.execute("ALTER TABLE dashboard_cache ADD COLUMN invoice_size INTEGER")
     if dashboard_cols and "cache_version" not in dashboard_cols:
         cur.execute("ALTER TABLE dashboard_cache ADD COLUMN cache_version INTEGER DEFAULT 1")
+
+    cur.execute("PRAGMA table_info(customer_retention_monthly_cache)")
+    retention_cols = [row[1] for row in cur.fetchall()]
+    if retention_cols and "invoice_mtime" not in retention_cols:
+        cur.execute("ALTER TABLE customer_retention_monthly_cache ADD COLUMN invoice_mtime REAL")
+    if retention_cols and "invoice_size" not in retention_cols:
+        cur.execute("ALTER TABLE customer_retention_monthly_cache ADD COLUMN invoice_size INTEGER")
+    if retention_cols and "avg_customer_volume" not in retention_cols:
+        cur.execute("ALTER TABLE customer_retention_monthly_cache ADD COLUMN avg_customer_volume REAL DEFAULT 0")
+    if retention_cols and "lost_count" not in retention_cols:
+        cur.execute("ALTER TABLE customer_retention_monthly_cache ADD COLUMN lost_count INTEGER DEFAULT 0")
+    if retention_cols and "lost_customers_json" not in retention_cols:
+        cur.execute("ALTER TABLE customer_retention_monthly_cache ADD COLUMN lost_customers_json TEXT NOT NULL DEFAULT '[]'")
+    if retention_cols and "cache_version" not in retention_cols:
+        cur.execute("ALTER TABLE customer_retention_monthly_cache ADD COLUMN cache_version INTEGER DEFAULT 1")
+
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_recipients_responsible_id "
+        "ON recipients(responsible_id)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_responsible_assignment_history_recipient "
+        "ON responsible_assignment_history(recipient_id, changed_at DESC)"
+    )
+    cur.execute(
+        "CREATE INDEX IF NOT EXISTS idx_retention_cache_computed_at "
+        "ON customer_retention_monthly_cache(computed_at DESC)"
+    )
 
     conn.commit()
     conn.close()
@@ -556,6 +667,531 @@ def invalidate_dashboard_cache():
     cur.execute("DELETE FROM dashboard_cache WHERE cache_key = ?", (DASHBOARD_CACHE_KEY,))
     conn.commit()
     conn.close()
+
+
+def month_start(value):
+    return date(value.year, value.month, 1)
+
+
+def add_months(value, delta):
+    month_index = (value.year * 12 + (value.month - 1)) + delta
+    year = month_index // 12
+    month = (month_index % 12) + 1
+    return date(year, month, 1)
+
+
+def get_last_n_month_entries(n=12, today=None):
+    if today is None:
+        today = get_business_date()
+    current_month_start = month_start(today)
+    start = add_months(current_month_start, -(n - 1))
+    months = []
+    for i in range(n):
+        dt = add_months(start, i)
+        months.append(
+            {
+                "month_start": dt,
+                "month_key": dt.strftime("%Y-%m"),
+                "label": dt.strftime("%m/%y"),
+            }
+        )
+    return months
+
+
+def get_retention_customer_lookup():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute("SELECT id, group_name FROM recipients WHERE recipient_type = 'single'")
+    singles = [dict(row) for row in cur.fetchall()]
+    single_ids = [row["id"] for row in singles]
+    aliases_by_id = {}
+    if single_ids:
+        placeholders = ",".join(["?"] * len(single_ids))
+        cur.execute(
+            f"SELECT recipient_id, alias_name FROM customer_aliases WHERE recipient_id IN ({placeholders})",
+            single_ids,
+        )
+        for row in cur.fetchall():
+            alias_name = normalize_name(row["alias_name"])
+            if not alias_name:
+                continue
+            aliases_by_id.setdefault(row["recipient_id"], []).append(alias_name)
+    conn.close()
+
+    lookup = {}
+    for row in singles:
+        payload = {"id": row["id"], "name": row["group_name"]}
+        base_key = name_key(row["group_name"])
+        if base_key:
+            lookup[base_key] = payload
+        for alias_name in aliases_by_id.get(row["id"], []):
+            alias_key = name_key(alias_name)
+            if alias_key:
+                lookup[alias_key] = payload
+    return lookup
+
+
+def get_retention_cache_rows(month_keys):
+    if not month_keys:
+        return {}
+    placeholders = ",".join(["?"] * len(month_keys))
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT * FROM customer_retention_monthly_cache WHERE month_key IN ({placeholders})",
+        month_keys,
+    )
+    rows = {row["month_key"]: dict(row) for row in cur.fetchall()}
+    conn.close()
+    return rows
+
+
+def retention_cache_row_matches_signature(cache_row, signature):
+    if not cache_row:
+        return False
+    return (
+        cache_row.get("invoice_file_id") == signature.get("invoice_file_id")
+        and (cache_row.get("invoice_path") or "") == (signature.get("invoice_path") or "")
+        and cache_row.get("invoice_mtime") == signature.get("invoice_mtime")
+        and cache_row.get("invoice_size") == signature.get("invoice_size")
+    )
+
+
+def retention_cache_row_has_current_version(cache_row):
+    if not cache_row:
+        return False
+    return int(cache_row.get("cache_version") or 0) == RETENTION_CACHE_VERSION
+
+
+def save_retention_cache_row(month_key, metric, signature):
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO customer_retention_monthly_cache(month_key, active_count, new_count, new_customers_json, avg_customer_volume, lost_count, lost_customers_json, invoice_file_id, invoice_path, invoice_mtime, invoice_size, cache_version, computed_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(month_key) DO UPDATE SET active_count = excluded.active_count, new_count = excluded.new_count, "
+        "new_customers_json = excluded.new_customers_json, avg_customer_volume = excluded.avg_customer_volume, "
+        "lost_count = excluded.lost_count, lost_customers_json = excluded.lost_customers_json, "
+        "invoice_file_id = excluded.invoice_file_id, invoice_path = excluded.invoice_path, invoice_mtime = excluded.invoice_mtime, "
+        "invoice_size = excluded.invoice_size, cache_version = excluded.cache_version, computed_at = excluded.computed_at",
+        (
+            month_key,
+            int(metric.get("active_count", 0)),
+            int(metric.get("new_count", 0)),
+            json.dumps(metric.get("new_customers", [])),
+            float(metric.get("avg_customer_volume", 0.0)),
+            int(metric.get("lost_count", 0) or 0),
+            json.dumps(metric.get("lost_customers", [])),
+            signature.get("invoice_file_id"),
+            signature.get("invoice_path"),
+            signature.get("invoice_mtime"),
+            signature.get("invoice_size"),
+            RETENTION_CACHE_VERSION,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def compute_retention_month_metrics(df, month_keys):
+    month_filter = set(month_keys)
+    metrics = {
+        key: {
+            "active_count": 0,
+            "new_count": 0,
+            "new_customers": [],
+            "avg_customer_volume": 0.0,
+            "lost_count": 0,
+            "lost_customers": [],
+        }
+        for key in month_keys
+    }
+    if df is None or df.empty:
+        return metrics
+
+    customer_lookup = get_retention_customer_lookup()
+    active_sets = {}
+    avg_sets = {}
+    first_month_by_customer = {}
+    last_month_by_customer = {}
+    customer_display = {}
+    known_customers = set()
+    month_totals = {}
+    custom_print_ids = get_custom_print_invoice_ids()
+
+    ship_series = pd.to_datetime(df.get("Shipping Date"), errors="coerce")
+    name_series = df.get("Customer Name")
+    total_series = pd.to_numeric(df.get("Order Total"), errors="coerce").fillna(0)
+    order_id_series = df.get("Order ID")
+    if ship_series is None or name_series is None or total_series is None or order_id_series is None:
+        return metrics
+
+    for raw_name, raw_ship, raw_total, raw_order_id in zip(name_series, ship_series, total_series, order_id_series):
+        if pd.isna(raw_ship):
+            continue
+        month_key = raw_ship.strftime("%Y-%m")
+        raw_name_clean = normalize_name(raw_name)
+        key = name_key(raw_name_clean)
+        if not key:
+            continue
+
+        known = customer_lookup.get(key)
+        if known:
+            customer_token = f"id:{known['id']}"
+            display_name = known["name"]
+            known_customers.add(customer_token)
+        else:
+            customer_token = f"name:{key}"
+            display_name = raw_name_clean
+
+        customer_display[customer_token] = display_name
+        previous_first = first_month_by_customer.get(customer_token)
+        if previous_first is None or month_key < previous_first:
+            first_month_by_customer[customer_token] = month_key
+        previous_last = last_month_by_customer.get(customer_token)
+        if previous_last is None or month_key > previous_last:
+            last_month_by_customer[customer_token] = month_key
+
+        if month_key in month_filter:
+            active_sets.setdefault(month_key, set()).add(customer_token)
+            order_id = normalize_invoice_id(raw_order_id)
+            is_custom_print = bool(order_id and order_id in custom_print_ids)
+            if not is_custom_print:
+                month_totals[month_key] = month_totals.get(month_key, 0.0) + float(raw_total or 0.0)
+                avg_sets.setdefault(month_key, set()).add(customer_token)
+
+    new_by_month = {}
+    for customer_token in known_customers:
+        first_month = first_month_by_customer.get(customer_token)
+        if first_month in month_filter:
+            new_by_month.setdefault(first_month, set()).add(customer_token)
+
+    lost_by_month = {}
+    for customer_token, last_month in last_month_by_customer.items():
+        if last_month in month_filter:
+            lost_by_month.setdefault(last_month, set()).add(customer_token)
+
+    for month_key in month_keys:
+        active_count = len(active_sets.get(month_key, set()))
+        new_customers = sorted(
+            [customer_display[token] for token in new_by_month.get(month_key, set())],
+            key=lambda value: value.lower(),
+        )
+        lost_customers = sorted(
+            [customer_display[token] for token in lost_by_month.get(month_key, set())],
+            key=lambda value: value.lower(),
+        )
+        avg_customer_volume = 0.0
+        avg_customer_count = len(avg_sets.get(month_key, set()))
+        if avg_customer_count > 0:
+            avg_customer_volume = month_totals.get(month_key, 0.0) / avg_customer_count
+        metrics[month_key] = {
+            "active_count": active_count,
+            "new_count": len(new_customers),
+            "new_customers": new_customers,
+            "avg_customer_volume": avg_customer_volume,
+            "lost_count": len(lost_customers),
+            "lost_customers": lost_customers,
+        }
+    return metrics
+
+
+def get_customer_retention_payload(selected_sales_rep=""):
+    months = get_last_n_month_entries(12, get_business_date())
+    month_keys = [entry["month_key"] for entry in months]
+    current_month_key = month_keys[-1] if month_keys else ""
+    signature = get_dashboard_invoice_signature()
+    cache_rows = get_retention_cache_rows(month_keys)
+
+    def get_missing_months(rows):
+        missing = []
+        for entry in months:
+            month_key = entry["month_key"]
+            cached_row = rows.get(month_key)
+            if not cached_row or not retention_cache_row_has_current_version(cached_row):
+                missing.append(month_key)
+                continue
+            if month_key == current_month_key:
+                if not retention_cache_row_matches_signature(cached_row, signature):
+                    missing.append(month_key)
+        return missing
+
+    missing_months = get_missing_months(cache_rows)
+    if missing_months and not signature.get("error") and signature.get("invoice_path"):
+        with RETENTION_CACHE_LOCK:
+            cache_rows = get_retention_cache_rows(month_keys)
+            missing_months = get_missing_months(cache_rows)
+            if missing_months:
+                source_df = load_invoice_df(signature["invoice_path"])
+                calculated = compute_retention_month_metrics(source_df, month_keys)
+                for month_key in missing_months:
+                    save_retention_cache_row(
+                        month_key,
+                        calculated.get(
+                            month_key,
+                            {"active_count": 0, "new_count": 0, "new_customers": [], "lost_count": 0, "lost_customers": []},
+                        ),
+                        signature,
+                    )
+                cache_rows = get_retention_cache_rows(month_keys)
+
+    labels = []
+    active_values = []
+    new_values = []
+    new_customers = []
+    average_volume_values = []
+    lost_values = []
+    lost_customers = []
+    cached_timestamps = []
+    for index, entry in enumerate(months):
+        month_key = entry["month_key"]
+        labels.append(entry["label"])
+        row = cache_rows.get(month_key)
+        if row:
+            active_values.append(int(row.get("active_count") or 0))
+            new_values.append(int(row.get("new_count") or 0))
+            average_volume_values.append(float(row.get("avg_customer_volume") or 0.0))
+            lost_count_value = int(row.get("lost_count") or 0)
+            if index == 0 or index == len(months) - 1:
+                lost_values.append(None)
+            else:
+                lost_values.append(lost_count_value)
+            try:
+                parsed_new = json.loads(row.get("new_customers_json") or "[]")
+                if not isinstance(parsed_new, list):
+                    parsed_new = []
+            except Exception:
+                parsed_new = []
+            try:
+                parsed_lost = json.loads(row.get("lost_customers_json") or "[]")
+                if not isinstance(parsed_lost, list):
+                    parsed_lost = []
+            except Exception:
+                parsed_lost = []
+            new_customers.append(parsed_new)
+            lost_customers.append(parsed_lost)
+            if row.get("computed_at"):
+                cached_timestamps.append(row["computed_at"])
+        else:
+            active_values.append(0)
+            new_values.append(0)
+            average_volume_values.append(0.0)
+            if index == 0 or index == len(months) - 1:
+                lost_values.append(None)
+            else:
+                lost_values.append(0)
+            new_customers.append([])
+            lost_customers.append([])
+
+    payload = {
+        "chart_data": {
+            "labels": labels,
+            "active_values": active_values,
+            "new_values": new_values,
+            "new_customers": new_customers,
+            "average_volume_values": average_volume_values,
+            "lost_values": lost_values,
+            "lost_customers": lost_customers,
+        },
+        "source_label": os.path.basename(signature["invoice_path"]) if signature.get("invoice_path") else "",
+        "retention_error": signature.get("error"),
+        "retention_cached_at": max(cached_timestamps) if cached_timestamps else "",
+    }
+    payload.update(
+        get_retention_sales_rep_table(signature.get("invoice_path"), selected_sales_rep)
+    )
+    return payload
+
+
+def get_last_full_month_entries(n=6, today=None):
+    if today is None:
+        today = get_business_date()
+    current_month_start = month_start(today)
+    latest_full_month_start = add_months(current_month_start, -1)
+    start = add_months(latest_full_month_start, -(n - 1))
+    months = []
+    for i in range(n):
+        dt = add_months(start, i)
+        months.append(
+            {
+                "month_start": dt,
+                "month_key": dt.strftime("%Y-%m"),
+                "label": dt.strftime("%b %y"),
+            }
+        )
+    return months
+
+
+def get_retention_sales_rep_table(invoice_path, selected_sales_rep=""):
+    sales_representatives = get_sales_representatives()
+    sales_rep_by_key = {
+        sales_representative_key(item["name"]): item["name"] for item in sales_representatives
+    }
+
+    selected_raw = normalize_sales_representative(selected_sales_rep)
+    selected_key = sales_representative_key(selected_raw)
+    selected_value = sales_rep_by_key.get(selected_key, "") if selected_raw else ""
+    selected_value_key = sales_representative_key(selected_value) if selected_value else ""
+
+    month_entries = get_last_full_month_entries(6, get_business_date())
+    month_keys = [entry["month_key"] for entry in month_entries]
+    month_filter = set(month_keys)
+    month_labels = {entry["month_key"]: entry["label"] for entry in month_entries}
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, group_name, sales_representative "
+        "FROM recipients "
+        "WHERE recipient_type = 'single' AND active = 1 "
+        "ORDER BY lower(group_name) ASC"
+    )
+    single_rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+
+    aliases_by_id = get_alias_names_by_recipient_ids([row["id"] for row in single_rows])
+    customer_lookup = {}
+    customers = []
+    for row in single_rows:
+        customer_sales_rep = normalize_sales_representative(row.get("sales_representative"))
+        customer_sales_rep_key = sales_representative_key(customer_sales_rep)
+        if selected_value_key and customer_sales_rep_key != selected_value_key:
+            continue
+
+        customer = {
+            "id": row["id"],
+            "name": row["group_name"],
+            "sales_representative": customer_sales_rep,
+        }
+        customers.append(customer)
+
+        keys = []
+        base_key = name_key(row["group_name"])
+        if base_key:
+            keys.append(base_key)
+        for alias_name in aliases_by_id.get(row["id"], []):
+            alias_key = name_key(alias_name)
+            if alias_key:
+                keys.append(alias_key)
+        for key in keys:
+            customer_lookup[key] = customer
+
+    rows = []
+    if customers and invoice_path and os.path.exists(invoice_path):
+        df = load_invoice_df(invoice_path)
+        ship_series = pd.to_datetime(df.get("Shipping Date"), errors="coerce")
+        name_series = df.get("Customer Name")
+        total_series = pd.to_numeric(df.get("Order Total"), errors="coerce").fillna(0)
+        order_series = df.get("Order ID")
+        custom_print_ids = get_custom_print_invoice_ids()
+
+        invoice_buckets = {}
+        for idx, (raw_ship, raw_name, raw_total, raw_order_id) in enumerate(
+            zip(ship_series, name_series, total_series, order_series)
+        ):
+            if pd.isna(raw_ship):
+                continue
+            month_key = raw_ship.strftime("%Y-%m")
+            if month_key not in month_filter:
+                continue
+
+            customer_key = name_key(raw_name)
+            customer = customer_lookup.get(customer_key)
+            if not customer:
+                continue
+
+            order_id = normalize_invoice_id(raw_order_id)
+            if order_id and order_id in custom_print_ids:
+                continue
+
+            order_token = order_id if order_id else f"row:{idx}"
+            amount = float(raw_total or 0.0)
+            customer_month_bucket = invoice_buckets.setdefault(customer["id"], {}).setdefault(month_key, {})
+            existing_amount = customer_month_bucket.get(order_token)
+            if existing_amount is None or amount > existing_amount:
+                customer_month_bucket[order_token] = amount
+
+        for customer in customers:
+            per_month = invoice_buckets.get(customer["id"], {})
+            previous_orders = None
+            month_cells = []
+            for month_key in month_keys:
+                order_map = per_month.get(month_key, {})
+                order_count = len(order_map)
+                total_amount = float(sum(order_map.values())) if order_map else 0.0
+                drop_flag = bool(
+                    previous_orders is not None
+                    and previous_orders > 0
+                    and order_count <= (previous_orders * 0.5)
+                )
+                month_cells.append(
+                    {
+                        "month_key": month_key,
+                        "month_label": month_labels[month_key],
+                        "order_count": order_count,
+                        "total_amount": total_amount,
+                        "drop_flag": drop_flag,
+                    }
+                )
+                previous_orders = order_count
+            if not any(cell["order_count"] > 0 for cell in month_cells):
+                continue
+            rows.append(
+                {
+                    "customer_id": customer["id"],
+                    "customer_name": customer["name"],
+                    "sales_representative": customer["sales_representative"],
+                    "months": month_cells,
+                }
+            )
+    else:
+        for customer in customers:
+            previous_orders = None
+            month_cells = []
+            for month_key in month_keys:
+                order_count = 0
+                drop_flag = bool(
+                    previous_orders is not None
+                    and previous_orders > 0
+                    and order_count <= (previous_orders * 0.5)
+                )
+                month_cells.append(
+                    {
+                        "month_key": month_key,
+                        "month_label": month_labels[month_key],
+                        "order_count": order_count,
+                        "total_amount": 0.0,
+                        "drop_flag": drop_flag,
+                    }
+                )
+                previous_orders = order_count
+            if not any(cell["order_count"] > 0 for cell in month_cells):
+                continue
+            rows.append(
+                {
+                    "customer_id": customer["id"],
+                    "customer_name": customer["name"],
+                    "sales_representative": customer["sales_representative"],
+                    "months": month_cells,
+                }
+            )
+
+    def row_sort_key(item):
+        flags_newest_first = [
+            bool(month_cell.get("drop_flag"))
+            for month_cell in reversed(item.get("months", []))
+        ]
+        priority_vector = tuple(0 if flagged else 1 for flagged in flags_newest_first)
+        return priority_vector, item["customer_name"].lower()
+
+    rows.sort(key=row_sort_key)
+    return {
+        "retention_sales_rep_months": month_entries,
+        "retention_sales_rep_rows": rows,
+        "retention_sales_rep_options": sales_representatives,
+        "retention_sales_rep_selected": selected_value,
+    }
 
 
 def load_upload_df(upload_file):
@@ -748,6 +1384,112 @@ def normalize_name(value):
 
 def name_key(value):
     return normalize_name(value).lower()
+
+
+def normalize_responsible_name(value):
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return " ".join(str(value).strip().split())
+
+
+def normalize_sales_representative(value):
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return " ".join(str(value).strip().split())
+
+
+def sales_representative_key(value):
+    return normalize_sales_representative(value).lower()
+
+
+def responsible_key(value):
+    return normalize_responsible_name(value).lower()
+
+
+def pick_responsible_color(existing_colors):
+    normalized = {str(color).strip().lower() for color in existing_colors if color}
+    for color in RESPONSIBLE_COLOR_PALETTE:
+        if color.lower() not in normalized:
+            return color
+    index = len(normalized) % len(RESPONSIBLE_COLOR_PALETTE)
+    return RESPONSIBLE_COLOR_PALETTE[index]
+
+
+def get_responsibles():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, name, color, created_at FROM responsibles ORDER BY lower(name) ASC"
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_sales_representatives():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, name, created_at FROM sales_representatives ORDER BY lower(name) ASC"
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_sales_representatives_with_counts():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT sr.id, sr.name, sr.created_at, COUNT(r.id) AS assigned_count "
+        "FROM sales_representatives sr "
+        "LEFT JOIN recipients r "
+        "ON LOWER(TRIM(COALESCE(r.sales_representative, ''))) = LOWER(sr.name) "
+        "GROUP BY sr.id, sr.name, sr.created_at "
+        "ORDER BY lower(sr.name) ASC"
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def get_responsibles_with_counts():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT rp.id, rp.name, rp.color, rp.created_at, COUNT(r.id) AS assigned_count "
+        "FROM responsibles rp "
+        "LEFT JOIN recipients r ON r.responsible_id = rp.id "
+        "GROUP BY rp.id, rp.name, rp.color, rp.created_at "
+        "ORDER BY lower(rp.name) ASC"
+    )
+    rows = [dict(row) for row in cur.fetchall()]
+    conn.close()
+    return rows
+
+
+def record_responsible_assignment(cur, recipient_id, old_responsible_id, new_responsible_id, changed_by="", source=""):
+    old_value = parse_int(old_responsible_id, None) if old_responsible_id is not None else None
+    new_value = parse_int(new_responsible_id, None) if new_responsible_id is not None else None
+    if old_value == new_value:
+        return
+    changed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cur.execute(
+        "INSERT INTO responsible_assignment_history(recipient_id, old_responsible_id, new_responsible_id, changed_at, changed_by, source) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            recipient_id,
+            old_value,
+            new_value,
+            changed_at,
+            (changed_by or "").strip() or "system",
+            (source or "").strip() or "unknown",
+        ),
+    )
 
 
 def parse_email_list(value):
@@ -1488,7 +2230,11 @@ def get_recipients_terms_map():
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, group_name, terms_code, net_terms, recipient_type, email_to, autopay_type FROM recipients WHERE active = 1"
+        "SELECT r.id, r.group_name, r.terms_code, r.net_terms, r.recipient_type, r.email_to, r.autopay_type, "
+        "r.responsible_id, rp.name AS responsible_name, rp.color AS responsible_color "
+        "FROM recipients r "
+        "LEFT JOIN responsibles rp ON rp.id = r.responsible_id "
+        "WHERE r.active = 1"
     )
     rows = cur.fetchall()
     conn.close()
@@ -1501,6 +2247,9 @@ def get_recipients_terms_map():
             "autopay_type": normalize_autopay_type(row["autopay_type"]) or "",
             "recipient_type": row["recipient_type"] or "single",
             "has_email": has_email_value(row["email_to"]),
+            "responsible_id": row["responsible_id"],
+            "responsible_name": normalize_responsible_name(row["responsible_name"]),
+            "responsible_color": row["responsible_color"] or "",
         }
     return recipients_map
 
@@ -2649,6 +3398,9 @@ def import_recipients_from_df(df):
         autopay_type = normalize_autopay_type(get_row_value(row, ["autopay", "autopay_type"]))
         if autopay_type is None:
             autopay_type = ""
+        sales_representative = normalize_sales_representative(
+            get_row_value(row, ["sales_representative", "sales_rep", "salesperson", "sales_person", "rep"])
+        )
         location = get_row_value(row, ["location"])
         location = "" if location is None or pd.isna(location) else str(location).strip()
 
@@ -2666,7 +3418,7 @@ def import_recipients_from_df(df):
         if existing:
             cur.execute(
                 "UPDATE recipients SET email_to = ?, net_terms = ?, terms_code = ?, location = ?, frequency = ?, "
-                "day_of_week = ?, day_of_month = ?, active = ?, autopay_type = ? WHERE id = ?",
+                "day_of_week = ?, day_of_month = ?, active = ?, autopay_type = ?, sales_representative = ? WHERE id = ?",
                 (
                     email_to,
                     net_terms,
@@ -2677,6 +3429,7 @@ def import_recipients_from_df(df):
                     day_of_month,
                     active,
                     autopay_type,
+                    sales_representative,
                     existing["id"],
                 ),
             )
@@ -2684,7 +3437,7 @@ def import_recipients_from_df(df):
         else:
             cur.execute(
                 "INSERT INTO recipients(group_name, email_to, net_terms, terms_code, location, frequency, day_of_week, "
-                "day_of_month, active, autopay_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "day_of_month, active, autopay_type, sales_representative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     group_name,
                     email_to,
@@ -2696,6 +3449,7 @@ def import_recipients_from_df(df):
                     day_of_month,
                     active,
                     autopay_type,
+                    sales_representative,
                     now,
                 ),
             )
@@ -2772,7 +3526,7 @@ def import_mappings_from_df(df):
     return added, updated, skipped, sorted(missing_groups)
 
 
-def import_bulk_customers_from_upload(upload_file):
+def import_bulk_customers_from_upload(upload_file, changed_by="system"):
     df = load_upload_df(upload_file)
     df = normalize_columns(df)
 
@@ -2787,10 +3541,23 @@ def import_bulk_customers_from_upload(upload_file):
     has_dow_col = any(col in df.columns for col in ["day_of_week", "weekday"])
     has_dom_col = "day_of_month" in df.columns
     has_autopay_col = "autopay" in df.columns
+    has_sales_rep_col = any(col in df.columns for col in ["sales_representative", "sales_rep", "salesperson", "sales_person", "rep"])
+    has_responsible_col = any(col in df.columns for col in ["responsible", "owner", "account_owner"])
 
-    if not any([has_terms_col, has_email_col, has_frequency_col, has_dow_col, has_dom_col, has_autopay_col]):
+    if not any(
+        [
+            has_terms_col,
+            has_email_col,
+            has_frequency_col,
+            has_dow_col,
+            has_dom_col,
+            has_autopay_col,
+            has_sales_rep_col,
+            has_responsible_col,
+        ]
+    ):
         raise RuntimeError(
-            "No updatable columns found. Include at least one of Terms, Email, Frequency, Day of Week, Day of Month, or Autopay."
+            "No updatable columns found. Include at least one of Terms, Email, Frequency, Day of Week, Day of Month, Autopay, Sales Representative, or Responsible."
         )
 
     latest_keys = set()
@@ -2804,32 +3571,20 @@ def import_bulk_customers_from_upload(upload_file):
     cur = conn.cursor()
     cur.execute("SELECT * FROM recipients ORDER BY id ASC")
     recipients = [dict(row) for row in cur.fetchall()]
+    recipient_by_key = {name_key(rec["group_name"]): rec for rec in recipients}
 
-    single_by_key = {}
-    single_by_id = {}
-    group_name_keys = set()
-    for rec in recipients:
-        key = name_key(rec["group_name"])
-        if rec["recipient_type"] == "single":
-            single_by_key[key] = rec
-            single_by_id[rec["id"]] = rec
-        else:
-            group_name_keys.add(key)
+    responsibles_by_key = {}
+    if has_responsible_col:
+        cur.execute("SELECT id, name FROM responsibles")
+        responsibles_by_key = {responsible_key(row["name"]): dict(row) for row in cur.fetchall()}
 
-    alias_lookup = {}
-    if single_by_id:
-        placeholders = ",".join(["?"] * len(single_by_id))
-        cur.execute(
-            f"SELECT alias_name, recipient_id FROM customer_aliases WHERE recipient_id IN ({placeholders})",
-            list(single_by_id.keys()),
-        )
-        for row in cur.fetchall():
-            alias_key = name_key(row["alias_name"])
-            rec = single_by_id.get(row["recipient_id"])
-            if alias_key and rec:
-                alias_lookup[alias_key] = rec
+    sales_representatives_by_key = {}
+    if has_sales_rep_col:
+        cur.execute("SELECT name FROM sales_representatives")
+        sales_representatives_by_key = {
+            sales_representative_key(row["name"]): row["name"] for row in cur.fetchall()
+        }
 
-    allowed_keys = set(single_by_key.keys()) | set(alias_lookup.keys()) | latest_keys
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     added = 0
     updated = 0
@@ -2844,11 +3599,6 @@ def import_bulk_customers_from_upload(upload_file):
             skipped_details.append(f"Row {row_no}: missing customer name")
             continue
         key = name_key(customer_name)
-
-        if key not in allowed_keys:
-            skipped += 1
-            skipped_details.append(f"Row {row_no}: customer not in New or All lists")
-            continue
 
         terms_code = None
         net_terms = None
@@ -2876,7 +3626,45 @@ def import_bulk_customers_from_upload(upload_file):
                         skipped_details.append(f"Row {row_no}: invalid autopay value (use ACH or CC)")
                         continue
 
-        existing = single_by_key.get(key) or alias_lookup.get(key)
+        sales_rep_value_present = False
+        sales_representative = ""
+        if has_sales_rep_col:
+            raw_sales_rep = get_row_value(row, ["sales_representative", "sales_rep", "salesperson", "sales_person", "rep"])
+            if raw_sales_rep is not None and not (isinstance(raw_sales_rep, float) and pd.isna(raw_sales_rep)):
+                normalized_sales_rep = normalize_sales_representative(raw_sales_rep)
+                if normalized_sales_rep:
+                    canonical_sales_rep = sales_representatives_by_key.get(
+                        sales_representative_key(normalized_sales_rep)
+                    )
+                    if not canonical_sales_rep:
+                        skipped += 1
+                        skipped_details.append(
+                            f"Row {row_no}: unknown sales representative '{normalized_sales_rep}'"
+                        )
+                        continue
+                    sales_representative = canonical_sales_rep
+                    sales_rep_value_present = True
+
+        responsible_value_present = False
+        responsible_id = None
+        if has_responsible_col:
+            raw_responsible = get_row_value(row, ["responsible", "owner", "account_owner"])
+            if raw_responsible is not None and not (isinstance(raw_responsible, float) and pd.isna(raw_responsible)):
+                raw_responsible_name = normalize_responsible_name(raw_responsible)
+                if raw_responsible_name:
+                    responsible_value_present = True
+                    raw_key = responsible_key(raw_responsible_name)
+                    if raw_key in {"none", "no responsible"}:
+                        responsible_id = None
+                    else:
+                        responsible_row = responsibles_by_key.get(raw_key)
+                        if not responsible_row:
+                            skipped += 1
+                            skipped_details.append(f"Row {row_no}: unknown responsible '{raw_responsible_name}'")
+                            continue
+                        responsible_id = responsible_row["id"]
+
+        existing = recipient_by_key.get(key)
         if existing:
             updates = []
             values = []
@@ -2916,6 +3704,22 @@ def import_bulk_customers_from_upload(upload_file):
                 updates.append("autopay_type = ?")
                 values.append(autopay_type)
 
+            if sales_rep_value_present:
+                updates.append("sales_representative = ?")
+                values.append(sales_representative)
+
+            if responsible_value_present:
+                updates.append("responsible_id = ?")
+                values.append(responsible_id)
+                record_responsible_assignment(
+                    cur,
+                    existing["id"],
+                    existing.get("responsible_id"),
+                    responsible_id,
+                    changed_by=changed_by,
+                    source="bulk_import",
+                )
+
             if not updates:
                 skipped += 1
                 skipped_details.append(f"Row {row_no}: no valid updates in row")
@@ -2923,17 +3727,14 @@ def import_bulk_customers_from_upload(upload_file):
 
             values.append(existing["id"])
             cur.execute(f"UPDATE recipients SET {', '.join(updates)} WHERE id = ?", values)
+            if responsible_value_present:
+                existing["responsible_id"] = responsible_id
             updated += 1
-            continue
-
-        if key in group_name_keys:
-            skipped += 1
-            skipped_details.append(f"Row {row_no}: name is already used by a group")
             continue
 
         if key not in latest_keys:
             skipped += 1
-            skipped_details.append(f"Row {row_no}: new customer must exist in latest invoice file")
+            skipped_details.append(f"Row {row_no}: customer not in New or All lists")
             continue
 
         if not terms_code:
@@ -2962,24 +3763,32 @@ def import_bulk_customers_from_upload(upload_file):
             )
 
         insert_autopay = autopay_type if autopay_type is not None else ""
+        insert_sales_rep = sales_representative if sales_rep_value_present else ""
+        insert_responsible = responsible_id if responsible_value_present else None
         cur.execute(
-            "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, frequency, day_of_week, day_of_month, active, created_at) "
-            "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+            "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, sales_representative, frequency, day_of_week, day_of_month, active, responsible_id, created_at) "
+            "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             (
                 customer_name,
                 email_to,
                 net_terms,
                 terms_code,
                 insert_autopay,
+                insert_sales_rep,
                 frequency,
                 day_of_week,
                 day_of_month,
+                insert_responsible,
                 now,
             ),
         )
         new_id = cur.lastrowid
-        single_by_key[key] = {"id": new_id, "group_name": customer_name}
-        allowed_keys.add(key)
+        recipient_by_key[key] = {
+            "id": new_id,
+            "group_name": customer_name,
+            "responsible_id": insert_responsible,
+            "sales_representative": insert_sales_rep,
+        }
         added += 1
 
     conn.commit()
@@ -4108,11 +4917,20 @@ def index():
     )
 
 
+@app.route("/customer-retention")
+def customer_retention():
+    selected_sales_rep = normalize_sales_representative(request.args.get("sales_rep", ""))
+    payload = get_customer_retention_payload(selected_sales_rep)
+    return render_template("customer_retention.html", **payload)
+
+
 @app.route("/overdue-report")
 def overdue_report():
     today = date.today()
     run = get_latest_overdue_run()
     active_tab = normalize_autopay_filter(request.args.get("tab"), default="none")
+    responsibles = get_responsibles()
+    show_responsible_column = bool(responsibles)
 
     rows = get_overdue_items(run["id"]) if run and run["status"] == "success" else []
     rows = [dict(row) for row in rows]
@@ -4125,6 +4943,9 @@ def overdue_report():
         recipient = recipients_map.get(row["group_name"])
         row["recipient_id"] = recipient["id"] if recipient else None
         row["has_email"] = bool(recipient and recipient.get("has_email"))
+        row["responsible_id"] = recipient.get("responsible_id") if recipient else None
+        row["responsible_name"] = recipient.get("responsible_name") if recipient else ""
+        row["responsible_color"] = recipient.get("responsible_color") if recipient else ""
         autopay_type = normalize_autopay_type(recipient.get("autopay_type") if recipient else row.get("autopay_type"))
         if autopay_type is None:
             autopay_type = ""
@@ -4193,7 +5014,57 @@ def overdue_report():
         total_overdue_amount=total_overdue_amount,
         total_short_paid_count=total_short_paid_count,
         total_short_paid_amount=total_short_paid_amount,
+        responsibles=responsibles,
+        show_responsible_column=show_responsible_column,
     )
+
+
+@app.route("/overdue-report/assign-responsible/<int:recipient_id>", methods=["POST"])
+def overdue_report_assign_responsible(recipient_id):
+    tab = normalize_autopay_filter(request.form.get("tab"), default="none")
+    changed_by = session.get("username", "system")
+    requested_id = parse_int(request.form.get("responsible_id"), None)
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, responsible_id FROM recipients WHERE id = ?",
+        (recipient_id,),
+    )
+    recipient = cur.fetchone()
+    if not recipient:
+        conn.close()
+        flash("Customer or group not found.", "error")
+        return redirect(url_for("overdue_report", tab=tab))
+
+    new_responsible_id = None
+    if requested_id is not None:
+        cur.execute("SELECT id FROM responsibles WHERE id = ?", (requested_id,))
+        responsible_row = cur.fetchone()
+        if not responsible_row:
+            conn.close()
+            flash("Selected responsible person was not found.", "error")
+            return redirect(url_for("overdue_report", tab=tab))
+        new_responsible_id = responsible_row["id"]
+
+    old_responsible_id = recipient["responsible_id"]
+    if old_responsible_id != new_responsible_id:
+        cur.execute(
+            "UPDATE recipients SET responsible_id = ? WHERE id = ?",
+            (new_responsible_id, recipient_id),
+        )
+        record_responsible_assignment(
+            cur,
+            recipient_id,
+            old_responsible_id,
+            new_responsible_id,
+            changed_by=changed_by,
+            source="overdue_report",
+        )
+        conn.commit()
+        flash("Responsible person updated.", "success")
+    conn.close()
+    return redirect(url_for("overdue_report", tab=tab))
 
 
 @app.route("/overdue-report/run", methods=["POST"])
@@ -4236,6 +5107,7 @@ def overdue_report_export():
                 "Group": row["group_name"],
                 "Terms": terms_label,
                 "Autopay": get_autopay_label(autopay_type),
+                "Responsible": recipient.get("responsible_name") if recipient else "",
                 "Overdue Invoices": int(row["overdue_count"]),
                 "Oldest Overdue Days": int(row["days_overdue"]),
                 "Overdue Amount": float(row["overdue_amount"]),
@@ -4582,13 +5454,124 @@ def customers_bulk_template():
         "Customer Name",
         "Terms",
         "Autopay",
+        "Sales Representative",
         "Email",
         "Frequency",
         "Day of Week",
         "Day of Month",
+        "Responsible",
     ]
     output = build_excel_template(columns, "bulk_customers")
     filename = "customers_bulk_update_template.xlsx"
+    return send_file(
+        output,
+        as_attachment=True,
+        download_name=filename,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.route("/customers/export")
+def customers_export():
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, group_name, recipient_type, email_to, terms_code, net_terms, autopay_type, sales_representative, frequency, day_of_week, day_of_month, active, responsible_id "
+        "FROM recipients ORDER BY group_name ASC"
+    )
+    recipients = [dict(row) for row in cur.fetchall()]
+    cur.execute("SELECT id, name FROM responsibles")
+    responsible_name_by_id = {row["id"]: row["name"] for row in cur.fetchall()}
+    conn.close()
+
+    grouped_customer_ids = get_grouped_customer_ids()
+    day_names = {
+        0: "Monday",
+        1: "Tuesday",
+        2: "Wednesday",
+        3: "Thursday",
+        4: "Friday",
+        5: "Saturday",
+        6: "Sunday",
+    }
+    export_columns = [
+        "Customer Name",
+        "Terms",
+        "Autopay",
+        "Sales Representative",
+        "Email",
+        "Frequency",
+        "Day of Week",
+        "Day of Month",
+        "Responsible",
+    ]
+
+    def to_row(rec):
+        terms_code = rec["terms_code"] or normalize_terms_code(rec["net_terms"]) or "net_30"
+        return {
+            "Customer Name": rec["group_name"],
+            "Terms": TERM_CODE_TO_LABEL.get(terms_code, terms_code),
+            "Autopay": get_autopay_label(rec.get("autopay_type")),
+            "Sales Representative": rec.get("sales_representative") or "",
+            "Email": rec.get("email_to") or "",
+            "Frequency": rec.get("frequency") or "",
+            "Day of Week": day_names.get(parse_int(rec.get("day_of_week"), 0, 0, 6), "Monday"),
+            "Day of Month": parse_int(rec.get("day_of_month"), 1, 1, 28),
+            "Responsible": responsible_name_by_id.get(rec.get("responsible_id"), ""),
+        }
+
+    groups_rows = []
+    singles_rows = []
+    inactive_rows = []
+    new_rows = []
+    for rec in recipients:
+        if rec["active"]:
+            if rec["recipient_type"] == "group":
+                groups_rows.append(to_row(rec))
+            elif rec["id"] not in grouped_customer_ids:
+                singles_rows.append(to_row(rec))
+        else:
+            inactive_rows.append(to_row(rec))
+
+    try:
+        latest_names, _ = get_latest_invoice_customer_names()
+        existing_single_keys = get_all_single_name_keys()
+        for name in latest_names:
+            if name_key(name) in existing_single_keys:
+                continue
+            new_rows.append(
+                {
+                    "Customer Name": name,
+                    "Terms": "",
+                    "Autopay": "",
+                    "Sales Representative": "",
+                    "Email": "",
+                    "Frequency": "",
+                    "Day of Week": "",
+                    "Day of Month": "",
+                    "Responsible": "",
+                }
+            )
+    except Exception:
+        new_rows = []
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        pd.DataFrame(new_rows, columns=export_columns).to_excel(
+            writer, index=False, sheet_name="new"
+        )
+        pd.DataFrame(groups_rows, columns=export_columns).to_excel(
+            writer, index=False, sheet_name="groups"
+        )
+        pd.DataFrame(singles_rows, columns=export_columns).to_excel(
+            writer, index=False, sheet_name="single"
+        )
+        pd.DataFrame(inactive_rows, columns=export_columns).to_excel(
+            writer, index=False, sheet_name="inactive"
+        )
+    output.seek(0)
+
+    filename = f"customers_export_{date.today().strftime('%Y%m%d')}.xlsx"
     return send_file(
         output,
         as_attachment=True,
@@ -4612,6 +5595,18 @@ def customers():
             terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
             net_terms = get_terms_days(terms_code)
             autopay_type = parse_autopay_from_form(request.form)
+            sales_representative = normalize_sales_representative(request.form.get("sales_representative", ""))
+            if sales_representative:
+                cur.execute(
+                    "SELECT name FROM sales_representatives WHERE lower(name) = lower(?)",
+                    (sales_representative,),
+                )
+                sales_rep_row = cur.fetchone()
+                if not sales_rep_row:
+                    conn.close()
+                    flash("Select a valid Sales Representative from the dropdown.", "error")
+                    return redirect(url_for("customers"))
+                sales_representative = sales_rep_row["name"]
             frequency = request.form.get("frequency", "weekly")
             day_of_week = parse_int(request.form.get("day_of_week"), 0, 0, 6)
             day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
@@ -4632,14 +5627,15 @@ def customers():
                 return redirect(url_for("customers"))
 
             cur.execute(
-                "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, frequency, day_of_week, day_of_month, active, created_at) "
-                "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, sales_representative, frequency, day_of_week, day_of_month, active, created_at) "
+                "VALUES (?, 'single', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     customer_name,
                     email_to,
                     net_terms,
                     terms_code,
                     autopay_type,
+                    sales_representative,
                     frequency,
                     day_of_week,
                     day_of_month,
@@ -4659,6 +5655,18 @@ def customers():
             terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
             net_terms = get_terms_days(terms_code)
             autopay_type = parse_autopay_from_form(request.form)
+            sales_representative = normalize_sales_representative(request.form.get("sales_representative", ""))
+            if sales_representative:
+                cur.execute(
+                    "SELECT name FROM sales_representatives WHERE lower(name) = lower(?)",
+                    (sales_representative,),
+                )
+                sales_rep_row = cur.fetchone()
+                if not sales_rep_row:
+                    conn.close()
+                    flash("Select a valid Sales Representative from the dropdown.", "error")
+                    return redirect(url_for("customers"))
+                sales_representative = sales_rep_row["name"]
             frequency = request.form.get("frequency", "weekly")
             day_of_week = parse_int(request.form.get("day_of_week"), 0, 0, 6)
             day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
@@ -4679,14 +5687,15 @@ def customers():
                 return redirect(url_for("customers"))
 
             cur.execute(
-                "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, frequency, day_of_week, day_of_month, active, created_at) "
-                "VALUES (?, 'group', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO recipients(group_name, recipient_type, email_to, net_terms, terms_code, autopay_type, sales_representative, frequency, day_of_week, day_of_month, active, created_at) "
+                "VALUES (?, 'group', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     group_name,
                     email_to,
                     net_terms,
                     terms_code,
                     autopay_type,
+                    sales_representative,
                     frequency,
                     day_of_week,
                     day_of_month,
@@ -4831,7 +5840,10 @@ def customers():
             upload = request.files.get("bulk_file")
             conn.close()
             try:
-                added, updated, skipped, skipped_details = import_bulk_customers_from_upload(upload)
+                added, updated, skipped, skipped_details = import_bulk_customers_from_upload(
+                    upload,
+                    changed_by=session.get("username", "system"),
+                )
                 if added or updated:
                     invalidate_dashboard_cache()
                 flash(f"Bulk update complete. Added {added}, updated {updated}, skipped {skipped}.", "success")
@@ -4889,6 +5901,7 @@ def customers():
 
     term_labels = {code: label for code, label in TERM_OPTIONS}
     autopay_labels = AUTOPAY_LABELS
+    sales_representatives = get_sales_representatives()
     return render_template(
         "customers.html",
         new_customers=new_customers,
@@ -4904,6 +5917,7 @@ def customers():
         term_options=TERM_OPTIONS,
         term_labels=term_labels,
         autopay_labels=autopay_labels,
+        sales_representatives=sales_representatives,
         invoice_label=invoice_label,
     )
 
@@ -4947,6 +5961,18 @@ def edit_customer(recipient_id):
         terms_code = get_terms_code(request.form.get("terms_code", "net_30"))
         net_terms = get_terms_days(terms_code)
         autopay_type = parse_autopay_from_form(request.form)
+        sales_representative = normalize_sales_representative(request.form.get("sales_representative", ""))
+        if sales_representative:
+            cur.execute(
+                "SELECT name FROM sales_representatives WHERE lower(name) = lower(?)",
+                (sales_representative,),
+            )
+            sales_rep_row = cur.fetchone()
+            if not sales_rep_row:
+                conn.close()
+                flash("Select a valid Sales Representative from the dropdown.", "error")
+                return redirect(url_for("edit_customer", recipient_id=recipient_id))
+            sales_representative = sales_rep_row["name"]
         frequency = request.form.get("frequency", "weekly")
         day_of_week = parse_int(request.form.get("day_of_week"), 0, 0, 6)
         day_of_month = parse_int(request.form.get("day_of_month"), 1, 1, 28)
@@ -4968,13 +5994,14 @@ def edit_customer(recipient_id):
 
         cur.execute(
             "UPDATE recipients SET group_name = ?, email_to = ?, net_terms = ?, terms_code = ?, "
-            "autopay_type = ?, frequency = ?, day_of_week = ?, day_of_month = ?, active = ? WHERE id = ?",
+            "autopay_type = ?, sales_representative = ?, frequency = ?, day_of_week = ?, day_of_month = ?, active = ? WHERE id = ?",
             (
                 group_name,
                 email_to,
                 net_terms,
                 terms_code,
                 autopay_type,
+                sales_representative,
                 frequency,
                 day_of_week,
                 day_of_month,
@@ -5027,6 +6054,7 @@ def edit_customer(recipient_id):
             member_ids=member_ids,
             term_options=TERM_OPTIONS,
             term_labels=term_labels,
+            sales_representatives=get_sales_representatives(),
         )
 
     conn.close()
@@ -5036,6 +6064,7 @@ def edit_customer(recipient_id):
         recipient=recipient,
         term_options=TERM_OPTIONS,
         term_labels=term_labels,
+        sales_representatives=get_sales_representatives(),
     )
 
 
@@ -5271,7 +6300,7 @@ def send_download():
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     template_keys = ["statement", "overdue", "follow_up", "skipped", "short_paid"]
-    allowed_tabs = {"general", "templates"}
+    allowed_tabs = {"general", "templates", "staff"}
     if request.method == "POST":
         form_type = request.form.get("form_type", "general")
         if form_type == "reset_overdue_follow_up":
@@ -5291,6 +6320,115 @@ def settings():
                 set_setting(setting_key, value)
             flash("Email templates saved.", "success")
             return redirect(url_for("settings", tab="templates"))
+
+        if form_type == "add_responsible":
+            responsible_name = normalize_responsible_name(request.form.get("responsible_name", ""))
+            if not responsible_name:
+                flash("Responsible name is required.", "error")
+                return redirect(url_for("settings", tab="staff"))
+
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM responsibles WHERE lower(name) = lower(?)", (responsible_name,))
+            if cur.fetchone():
+                conn.close()
+                flash("That responsible person already exists.", "error")
+                return redirect(url_for("settings", tab="staff"))
+
+            cur.execute("SELECT color FROM responsibles")
+            existing_colors = [row["color"] for row in cur.fetchall()]
+            color = pick_responsible_color(existing_colors)
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                "INSERT INTO responsibles(name, color, created_at) VALUES (?, ?, ?)",
+                (responsible_name, color, now),
+            )
+            conn.commit()
+            conn.close()
+            flash("Responsible person added.", "success")
+            return redirect(url_for("settings", tab="staff"))
+
+        if form_type == "delete_responsible":
+            responsible_id = parse_int(request.form.get("responsible_id"), None)
+            if not responsible_id:
+                flash("Responsible person not found.", "error")
+                return redirect(url_for("settings", tab="staff"))
+
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT id, name FROM responsibles WHERE id = ?", (responsible_id,))
+            responsible = cur.fetchone()
+            if not responsible:
+                conn.close()
+                flash("Responsible person not found.", "error")
+                return redirect(url_for("settings", tab="staff"))
+
+            cur.execute("SELECT id, responsible_id FROM recipients WHERE responsible_id = ?", (responsible_id,))
+            assigned_recipients = cur.fetchall()
+            for recipient in assigned_recipients:
+                record_responsible_assignment(
+                    cur,
+                    recipient["id"],
+                    recipient["responsible_id"],
+                    None,
+                    changed_by=session.get("username", "system"),
+                    source="settings_delete_responsible",
+                )
+            cur.execute("UPDATE recipients SET responsible_id = NULL WHERE responsible_id = ?", (responsible_id,))
+            cur.execute("DELETE FROM responsibles WHERE id = ?", (responsible_id,))
+            conn.commit()
+            conn.close()
+            flash(f"Responsible '{responsible['name']}' removed.", "success")
+            return redirect(url_for("settings", tab="staff"))
+
+        if form_type == "add_sales_representative":
+            sales_rep_name = normalize_sales_representative(request.form.get("sales_representative_name", ""))
+            if not sales_rep_name:
+                flash("Sales Representative name is required.", "error")
+                return redirect(url_for("settings", tab="staff"))
+
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM sales_representatives WHERE lower(name) = lower(?)", (sales_rep_name,))
+            if cur.fetchone():
+                conn.close()
+                flash("That Sales Representative already exists.", "error")
+                return redirect(url_for("settings", tab="staff"))
+
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            cur.execute(
+                "INSERT INTO sales_representatives(name, created_at) VALUES (?, ?)",
+                (sales_rep_name, now),
+            )
+            conn.commit()
+            conn.close()
+            flash("Sales Representative added.", "success")
+            return redirect(url_for("settings", tab="staff"))
+
+        if form_type == "delete_sales_representative":
+            sales_rep_id = parse_int(request.form.get("sales_representative_id"), None)
+            if not sales_rep_id:
+                flash("Sales Representative not found.", "error")
+                return redirect(url_for("settings", tab="staff"))
+
+            conn = get_db()
+            cur = conn.cursor()
+            cur.execute("SELECT id, name FROM sales_representatives WHERE id = ?", (sales_rep_id,))
+            sales_rep = cur.fetchone()
+            if not sales_rep:
+                conn.close()
+                flash("Sales Representative not found.", "error")
+                return redirect(url_for("settings", tab="staff"))
+
+            cur.execute(
+                "UPDATE recipients SET sales_representative = '' WHERE lower(sales_representative) = lower(?)",
+                (sales_rep["name"],),
+            )
+            cur.execute("DELETE FROM sales_representatives WHERE id = ?", (sales_rep_id,))
+            conn.commit()
+            conn.close()
+            flash(f"Sales Representative '{sales_rep['name']}' removed.", "success")
+            return redirect(url_for("settings", tab="staff"))
 
         fields = [
             "smtp_host",
@@ -5361,13 +6499,19 @@ def settings():
         "invoice_path",
     ]}
     email_templates = {key: get_email_template_body(key) for key in template_keys}
+    responsibles = get_responsibles_with_counts()
+    sales_representatives = get_sales_representatives_with_counts()
     active_tab = request.args.get("tab", "general")
+    if active_tab == "responsibles":
+        active_tab = "staff"
     if active_tab not in allowed_tabs:
         active_tab = "general"
     return render_template(
         "settings.html",
         settings=settings_data,
         email_templates=email_templates,
+        responsibles=responsibles,
+        sales_representatives=sales_representatives,
         active_tab=active_tab,
     )
 

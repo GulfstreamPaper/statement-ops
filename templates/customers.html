@@ -2,6 +2,7 @@
 {% block content %}
   <div class="panel">
     <h2>Customers</h2>
+    <p><a class="button-link export" href="{{ url_for('customers_export') }}">Export Customers</a></p>
     <div class="tabs">
       <button class="tab active" type="button" data-tab="tab-new">New</button>
       <button class="tab" type="button" data-tab="tab-groups">Groups</button>
@@ -20,7 +21,7 @@
     {% endif %}
     <div class="row">
       <div>
-        <p><small>Bulk Update (Excel): Customer Name, Terms, Autopay, Email, Frequency, Day of Week, Day of Month.</small></p>
+        <p><small>Bulk Update (Excel): Customer Name, Terms, Autopay, Sales Representative, Email, Frequency, Day of Week, Day of Month, Responsible.</small></p>
         <p><a class="button-link" href="{{ url_for('customers_bulk_template') }}">Download Bulk Template</a></p>
         <form method="post" enctype="multipart/form-data" class="inline-upload">
           <input type="hidden" name="form_type" value="bulk_update" />
@@ -78,6 +79,15 @@
           <select name="terms_code">
             {% for code, label in term_options %}
               <option value="{{ code }}" {% if code == 'net_30' %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
+          <label>Sales Representative</label>
+          <select name="sales_representative">
+            <option value="">No sales representative</option>
+            {% for sales_rep in sales_representatives %}
+              <option value="{{ sales_rep['name'] }}">{{ sales_rep['name'] }}</option>
             {% endfor %}
           </select>
         </div>
@@ -166,13 +176,14 @@
           <th>Email</th>
           <th>Terms</th>
           <th>Autopay</th>
+          <th>Sales Rep</th>
           <th>Frequency</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         {% for g in groups %}
-          <tr data-search="{{ (g['group_name'] ~ ' ' ~ g['email_to']) | lower }}">
+          <tr data-search="{{ (g['group_name'] ~ ' ' ~ g['email_to'] ~ ' ' ~ (g['sales_representative'] or '')) | lower }}">
             <td>{{ g['group_name'] }}</td>
             <td>
               <span>{{ group_member_counts.get(g['id'], 0) }}</span>
@@ -181,6 +192,7 @@
             <td>{{ g['email_to'] }}</td>
             <td>{{ term_labels.get(g['terms_code'], g['terms_code']) }}</td>
             <td>{{ autopay_labels.get(g['autopay_type'] or '', 'None') }}</td>
+            <td>{{ g['sales_representative'] or '-' }}</td>
             <td>{{ g['frequency'] }}</td>
             <td class="actions">
               <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=g['id']) }}">Download</a>
@@ -191,7 +203,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="7">No groups yet.</td></tr>
+          <tr><td colspan="8">No groups yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -213,17 +225,19 @@
           <th>Email</th>
           <th>Terms</th>
           <th>Autopay</th>
+          <th>Sales Rep</th>
           <th>Frequency</th>
           <th>Actions</th>
         </tr>
       </thead>
       <tbody>
         {% for r in single_only %}
-          <tr data-search="{{ (r['group_name'] ~ ' ' ~ r['email_to']) | lower }}">
+          <tr data-search="{{ (r['group_name'] ~ ' ' ~ r['email_to'] ~ ' ' ~ (r['sales_representative'] or '')) | lower }}">
             <td>{{ r['group_name'] }}</td>
             <td>{{ r['email_to'] }}</td>
             <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
             <td>{{ autopay_labels.get(r['autopay_type'] or '', 'None') }}</td>
+            <td>{{ r['sales_representative'] or '-' }}</td>
             <td>{{ r['frequency'] }}</td>
             <td class="actions">
               <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
@@ -235,7 +249,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="6">No single customers outside groups.</td></tr>
+          <tr><td colspan="7">No single customers outside groups.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -266,6 +280,7 @@
           <th>Email</th>
           <th>Terms</th>
           <th>Autopay</th>
+          <th>Sales Rep</th>
           <th>Frequency</th>
           <th>Group / Members</th>
           <th>Actions</th>
@@ -273,12 +288,13 @@
       </thead>
       <tbody>
         {% for r in all_recipients %}
-          <tr data-search="{{ (r['group_name'] ~ ' ' ~ r['email_to']) | lower }}" data-type="{{ r['recipient_type'] }}">
+          <tr data-search="{{ (r['group_name'] ~ ' ' ~ r['email_to'] ~ ' ' ~ (r['sales_representative'] or '')) | lower }}" data-type="{{ r['recipient_type'] }}">
             <td>{{ r['group_name'] }}</td>
             <td>{{ 'Group' if r['recipient_type'] == 'group' else 'Single' }}</td>
             <td>{{ r['email_to'] }}</td>
             <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
             <td>{{ autopay_labels.get(r['autopay_type'] or '', 'None') }}</td>
+            <td>{{ r['sales_representative'] or '-' }}</td>
             <td>{{ r['frequency'] }}</td>
             <td>
               {% if r['recipient_type'] == 'group' %}
@@ -299,7 +315,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="8">No customers yet.</td></tr>
+          <tr><td colspan="9">No customers yet.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -315,6 +331,7 @@
           <th>Email</th>
           <th>Terms</th>
           <th>Autopay</th>
+          <th>Sales Rep</th>
           <th>Frequency</th>
           <th>Actions</th>
         </tr>
@@ -327,6 +344,7 @@
             <td>{{ r['email_to'] }}</td>
             <td>{{ term_labels.get(r['terms_code'], r['terms_code']) }}</td>
             <td>{{ autopay_labels.get(r['autopay_type'] or '', 'None') }}</td>
+            <td>{{ r['sales_representative'] or '-' }}</td>
             <td>{{ r['frequency'] }}</td>
             <td class="actions">
               <a class="button-link" target="_blank" rel="noopener" href="{{ url_for('download_statement', recipient_id=r['id']) }}">Download</a>
@@ -340,7 +358,7 @@
             </td>
           </tr>
         {% else %}
-          <tr><td colspan="7">No inactive customers.</td></tr>
+          <tr><td colspan="8">No inactive customers.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -365,6 +383,15 @@
             <select name="terms_code">
               {% for code, label in term_options %}
                 <option value="{{ code }}" {% if code == 'net_30' %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div>
+            <label>Sales Representative</label>
+            <select name="sales_representative">
+              <option value="">No sales representative</option>
+              {% for sales_rep in sales_representatives %}
+                <option value="{{ sales_rep['name'] }}">{{ sales_rep['name'] }}</option>
               {% endfor %}
             </select>
           </div>

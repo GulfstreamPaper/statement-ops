@@ -3,12 +3,13 @@
   <div class="panel">
     <h2>Settings</h2>
     <div class="tabs">
-      <button class="tab {% if active_tab != 'templates' %}active{% endif %}" type="button" data-tab="tab-settings-general">General</button>
+      <button class="tab {% if active_tab == 'general' %}active{% endif %}" type="button" data-tab="tab-settings-general">General</button>
       <button class="tab {% if active_tab == 'templates' %}active{% endif %}" type="button" data-tab="tab-settings-templates">Email Templates</button>
+      <button class="tab {% if active_tab == 'staff' %}active{% endif %}" type="button" data-tab="tab-settings-staff">Staff</button>
     </div>
   </div>
 
-  <div class="panel tab-panel {% if active_tab != 'templates' %}active{% endif %}" id="tab-settings-general">
+  <div class="panel tab-panel {% if active_tab == 'general' %}active{% endif %}" id="tab-settings-general">
     <h2>SMTP Settings</h2>
     <form method="post" enctype="multipart/form-data">
       <input type="hidden" name="form_type" value="general" />
@@ -185,6 +186,76 @@
       </div>
       <button type="submit">Save Templates</button>
     </form>
+  </div>
+
+  <div class="panel tab-panel {% if active_tab == 'staff' %}active{% endif %}" id="tab-settings-staff">
+    <h2>Responsible People</h2>
+    <form method="post" class="inline-upload">
+      <input type="hidden" name="form_type" value="add_responsible" />
+      <input name="responsible_name" placeholder="Enter responsible name" required />
+      <button type="submit">Add Responsible</button>
+    </form>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Color</th>
+          <th>Name</th>
+          <th>Assigned Customers</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for person in responsibles %}
+          <tr>
+            <td><span class="responsible-dot" style="background: {{ person['color'] }};"></span></td>
+            <td>{{ person['name'] }}</td>
+            <td>{{ person['assigned_count'] }}</td>
+            <td class="actions">
+              <form method="post" onsubmit="return confirm('Delete this responsible person? Assigned customers will be set to No responsible.');">
+                <input type="hidden" name="form_type" value="delete_responsible" />
+                <input type="hidden" name="responsible_id" value="{{ person['id'] }}" />
+                <button type="submit" class="danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4">No responsible people configured.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <h2>Sales Representatives</h2>
+    <form method="post" class="inline-upload">
+      <input type="hidden" name="form_type" value="add_sales_representative" />
+      <input name="sales_representative_name" placeholder="Enter sales representative name" required />
+      <button type="submit">Add Sales Representative</button>
+    </form>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Assigned Customers</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for sales_rep in sales_representatives %}
+          <tr>
+            <td>{{ sales_rep['name'] }}</td>
+            <td>{{ sales_rep['assigned_count'] }}</td>
+            <td class="actions">
+              <form method="post" onsubmit="return confirm('Delete this Sales Representative? Assigned customers will be set to No sales representative.');">
+                <input type="hidden" name="form_type" value="delete_sales_representative" />
+                <input type="hidden" name="sales_representative_id" value="{{ sales_rep['id'] }}" />
+                <button type="submit" class="danger">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="3">No sales representatives configured.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
   </div>
 
   <script>

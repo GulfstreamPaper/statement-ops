@@ -1,0 +1,375 @@
+{% extends "base.html" %}
+{% block content %}
+  <div class="panel">
+    <h2>Customer Retention</h2>
+    <div class="row">
+      <div>
+        <p><small>Source file: {{ source_label or 'No invoice file found' }}</small></p>
+        {% if retention_cached_at %}
+          <p><small>Last calculated: {{ retention_cached_at }}</small></p>
+        {% endif %}
+        {% if retention_error %}
+          <p><small>{{ retention_error }}</small></p>
+        {% endif %}
+      </div>
+    </div>
+    <div class="retention-two-grid">
+      <div class="retention-chart-card">
+        <h3>Active Customers (Last 12 Months)</h3>
+        <div class="retention-chart-wrap">
+          <svg id="retentionActiveChart" viewBox="0 0 1100 360" role="img" aria-label="Active customers over last 12 months"></svg>
+        </div>
+      </div>
+      <div class="retention-chart-card">
+        <h3>New Customers (Last 12 Months)</h3>
+        <div class="retention-chart-wrap">
+          <svg id="retentionNewChart" viewBox="0 0 1100 360" role="img" aria-label="New customers over last 12 months"></svg>
+        </div>
+        <p><small>Click a point to view customer names for that month.</small></p>
+      </div>
+      <div class="retention-chart-card">
+        <h3>Average Customer Volume Per Month</h3>
+        <div class="retention-chart-wrap">
+          <svg id="retentionAvgChart" viewBox="0 0 1100 360" role="img" aria-label="Average customer volume per month"></svg>
+        </div>
+      </div>
+      <div class="retention-chart-card">
+        <h3>Customers Lost (Exclude First & Last Month)</h3>
+        <div class="retention-chart-wrap">
+          <svg id="retentionLostChart" viewBox="0 0 1100 360" role="img" aria-label="Customers lost per month"></svg>
+        </div>
+        <p><small>Click a point to view customer names for that month.</small></p>
+      </div>
+    </div>
+    <div id="retentionTooltip" class="retention-tooltip"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Customer Retention By Sales Rep</h2>
+    <form method="get" class="inline-upload retention-sales-filter">
+      <label for="retentionSalesRepSelect">Sales Rep</label>
+      <select id="retentionSalesRepSelect" name="sales_rep">
+        <option value="" {% if not retention_sales_rep_selected %}selected{% endif %}>All Sales Reps</option>
+        {% for sales_rep in retention_sales_rep_options %}
+          <option value="{{ sales_rep['name'] }}" {% if retention_sales_rep_selected == sales_rep['name'] %}selected{% endif %}>
+            {{ sales_rep['name'] }}
+          </option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="secondary">Apply</button>
+    </form>
+
+    {% if retention_sales_rep_rows %}
+      <div class="retention-sales-table-wrap">
+        <table class="table retention-sales-table">
+          <thead>
+            <tr>
+              <th>Customer</th>
+              {% for month in retention_sales_rep_months %}
+                <th class="retention-sales-month-header">{{ month['label'] }}</th>
+              {% endfor %}
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in retention_sales_rep_rows %}
+              <tr>
+                <td>{{ row['customer_name'] }}</td>
+                {% for month_cell in row['months'] %}
+                  <td class="retention-sales-month-cell {% if month_cell['drop_flag'] %}drop-alert{% endif %}">
+                    <div class="retention-sales-month-split">
+                      <div class="retention-sales-orders">{{ month_cell['order_count'] }}</div>
+                      <div class="retention-sales-amount">${{ "{:,.2f}".format(month_cell['total_amount']) }}</div>
+                    </div>
+                  </td>
+                {% endfor %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p><small>Highlighted cells indicate order count dropped 50% or more versus the previous month.</small></p>
+    {% else %}
+      <p><small>No customers found for the selected sales rep.</small></p>
+    {% endif %}
+  </div>
+
+  <div id="retentionListModal" class="modal">
+    <div class="modal-card">
+      <h3 id="retentionListTitle">Customers</h3>
+      <ul id="retentionListItems" class="terms-customer-list"></ul>
+      <div class="actions">
+        <button type="button" class="secondary" id="retentionListClose">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const retentionData = {{ chart_data | tojson }};
+    const activeSvg = document.getElementById('retentionActiveChart');
+    const newSvg = document.getElementById('retentionNewChart');
+    const avgSvg = document.getElementById('retentionAvgChart');
+    const lostSvg = document.getElementById('retentionLostChart');
+    const tooltip = document.getElementById('retentionTooltip');
+    const modal = document.getElementById('retentionListModal');
+    const modalTitle = document.getElementById('retentionListTitle');
+    const modalList = document.getElementById('retentionListItems');
+    const modalClose = document.getElementById('retentionListClose');
+
+    const labels = retentionData.labels || [];
+    const activeValues = retentionData.active_values || [];
+    const newValuesRaw = retentionData.new_values || [];
+    const newValues = newValuesRaw.map((value, index) => {
+      if (index === 0) {
+        return null;
+      }
+      return value;
+    });
+    const newCustomers = retentionData.new_customers || [];
+    const averageVolumeValues = retentionData.average_volume_values || [];
+    const lostValues = retentionData.lost_values || [];
+    const lostCustomers = retentionData.lost_customers || [];
+
+    function svgEl(tag, attrs = {}) {
+      const node = document.createElementNS('http://www.w3.org/2000/svg', tag);
+      Object.entries(attrs).forEach(([key, value]) => node.setAttribute(key, value));
+      return node;
+    }
+
+    function formatNumber(value) {
+      return Number(value || 0).toLocaleString();
+    }
+
+    function openCustomersList(title, monthLabel, customers) {
+      modalTitle.textContent = `${title} - ${monthLabel}`;
+      modalList.innerHTML = '';
+      if (!customers || !customers.length) {
+        const li = document.createElement('li');
+        li.textContent = 'No customers for this month.';
+        modalList.appendChild(li);
+      } else {
+        customers.forEach((name) => {
+          const li = document.createElement('li');
+          li.textContent = name;
+          modalList.appendChild(li);
+        });
+      }
+      modal.classList.add('active');
+    }
+
+    function closeCustomersList() {
+      modal.classList.remove('active');
+      modalList.innerHTML = '';
+    }
+
+    function drawLineChart(svg, values, options) {
+      svg.innerHTML = '';
+      const width = 1100;
+      const height = 360;
+      const margin = { top: 24, right: 24, bottom: 70, left: 62 };
+      const chartWidth = width - margin.left - margin.right;
+      const chartHeight = height - margin.top - margin.bottom;
+
+      const numericValues = values.filter((value) => Number.isFinite(Number(value))).map((value) => Number(value));
+      if (!labels.length || !numericValues.length) {
+        const emptyText = svgEl('text', { x: '550', y: '180', 'text-anchor': 'middle', class: 'retention-empty' });
+        emptyText.textContent = 'No data available.';
+        svg.appendChild(emptyText);
+        return;
+      }
+
+      const minValue = Math.max(0, Math.min(...numericValues));
+      const maxValue = Math.max(...numericValues);
+      const spread = Math.max(1, maxValue - minValue);
+      const yMin = Math.max(0, minValue - (spread * 0.35));
+      const yMax = Math.max(yMin + 1, maxValue + (spread * 0.35));
+      const yMinAxis = Math.floor(yMin);
+      const yMaxAxis = Math.ceil(yMax);
+      const axisRange = Math.max(1, yMaxAxis - yMinAxis);
+      const maxTickCount = 5;
+      const tickStep = Math.max(1, Math.ceil(axisRange / maxTickCount));
+      const yTickValues = [];
+      for (let tick = yMinAxis; tick <= yMaxAxis; tick += tickStep) {
+        yTickValues.push(tick);
+      }
+      if (yTickValues[yTickValues.length - 1] !== yMaxAxis) {
+        yTickValues.push(yMaxAxis);
+      }
+
+      function xAt(index) {
+        if (labels.length === 1) return margin.left + chartWidth / 2;
+        return margin.left + (index * chartWidth) / (labels.length - 1);
+      }
+
+      function yAt(value) {
+        return margin.top + chartHeight - (((Number(value) - yMinAxis) / (yMaxAxis - yMinAxis)) * chartHeight);
+      }
+
+      yTickValues.forEach((yValue) => {
+        const ratio = (yValue - yMinAxis) / axisRange;
+        const y = margin.top + chartHeight - (chartHeight * ratio);
+        const grid = svgEl('line', {
+          x1: margin.left,
+          y1: y,
+          x2: margin.left + chartWidth,
+          y2: y,
+          class: 'retention-grid',
+        });
+        svg.appendChild(grid);
+        const label = svgEl('text', {
+          x: margin.left - 10,
+          y: y + 4,
+          'text-anchor': 'end',
+          class: 'retention-axis-text',
+        });
+        if (options.axisFormatter) {
+          label.textContent = options.axisFormatter(yValue);
+        } else {
+          label.textContent = `${Math.round(yValue)}`;
+        }
+        svg.appendChild(label);
+      });
+
+      const yAxis = svgEl('line', {
+        x1: margin.left,
+        y1: margin.top,
+        x2: margin.left,
+        y2: margin.top + chartHeight,
+        class: 'retention-axis',
+      });
+      const xAxis = svgEl('line', {
+        x1: margin.left,
+        y1: margin.top + chartHeight,
+        x2: margin.left + chartWidth,
+        y2: margin.top + chartHeight,
+        class: 'retention-axis',
+      });
+      svg.appendChild(yAxis);
+      svg.appendChild(xAxis);
+
+      labels.forEach((month, index) => {
+        if (index === 0) {
+          return;
+        }
+        const x = xAt(index);
+        const label = svgEl('text', {
+          x,
+          y: margin.top + chartHeight + 22,
+          'text-anchor': 'middle',
+          class: 'retention-axis-text',
+        });
+        label.textContent = month;
+        svg.appendChild(label);
+      });
+
+      const segments = [];
+      let d = '';
+      values.forEach((value, index) => {
+        if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+          if (d.trim()) {
+            segments.push(d.trim());
+            d = '';
+          }
+          return;
+        }
+        const x = xAt(index);
+        const y = yAt(value);
+        d += `${d === '' ? 'M' : 'L'} ${x} ${y} `;
+      });
+      if (d.trim()) {
+        segments.push(d.trim());
+      }
+      segments.forEach((segment) => {
+        const path = svgEl('path', { d: segment, class: options.lineClass });
+        svg.appendChild(path);
+      });
+
+      values.forEach((value, index) => {
+        if (value === null || value === undefined || !Number.isFinite(Number(value))) {
+          return;
+        }
+        const x = xAt(index);
+        const y = yAt(value);
+        const defaultPointRadius = Number(options.pointRadius || 6);
+        const hoverPointRadius = Number(options.hoverPointRadius || 9);
+        const hit = svgEl('circle', {
+          cx: x,
+          cy: y,
+          r: 10,
+          class: 'retention-point-hit',
+        });
+        const point = svgEl('circle', {
+          cx: x,
+          cy: y,
+          r: defaultPointRadius,
+          class: options.pointClass,
+        });
+        const placeTooltip = (event) => {
+          const x = Number(event && event.clientX ? event.clientX : 0);
+          const y = Number(event && event.clientY ? event.clientY : 0);
+          tooltip.style.left = `${x + 12}px`;
+          tooltip.style.top = `${y - 30}px`;
+        };
+
+        const enter = (event) => {
+          point.setAttribute('r', `${hoverPointRadius}`);
+          point.classList.add('retention-point-hover');
+          const formatted = options.valueFormatter ? options.valueFormatter(value) : formatNumber(value);
+          tooltip.textContent = `${formatted}`;
+          tooltip.classList.add('active');
+          placeTooltip(event);
+        };
+        const move = (event) => placeTooltip(event);
+        const leave = () => {
+          point.setAttribute('r', `${defaultPointRadius}`);
+          point.classList.remove('retention-point-hover');
+          tooltip.classList.remove('active');
+        };
+
+        hit.addEventListener('mouseenter', enter);
+        point.addEventListener('mouseenter', enter);
+        hit.addEventListener('mousemove', move);
+        point.addEventListener('mousemove', move);
+        hit.addEventListener('mouseleave', leave);
+        point.addEventListener('mouseleave', leave);
+
+        if (options.onPointClick) {
+          hit.style.cursor = 'pointer';
+          point.style.cursor = 'pointer';
+          hit.addEventListener('click', () => options.onPointClick(index, value));
+          point.addEventListener('click', () => options.onPointClick(index, value));
+        }
+
+        svg.appendChild(hit);
+        svg.appendChild(point);
+      });
+    }
+
+    modalClose.addEventListener('click', closeCustomersList);
+    modal.addEventListener('click', (event) => {
+      if (event.target === modal) {
+        closeCustomersList();
+      }
+    });
+
+    drawLineChart(activeSvg, activeValues, {
+      lineClass: 'retention-line retention-line-active',
+      pointClass: 'retention-point retention-point-active',
+    });
+    drawLineChart(newSvg, newValues, {
+      lineClass: 'retention-line retention-line-new',
+      pointClass: 'retention-point retention-point-new',
+      onPointClick: (index) => openCustomersList('New Customers', labels[index], newCustomers[index] || []),
+    });
+    drawLineChart(avgSvg, averageVolumeValues, {
+      lineClass: 'retention-line retention-line-avg',
+      pointClass: 'retention-point retention-point-avg',
+      valueFormatter: (value) => Number(value || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+      axisFormatter: (value) => `${Math.round(value)}`,
+    });
+    drawLineChart(lostSvg, lostValues, {
+      lineClass: 'retention-line retention-line-lost',
+      pointClass: 'retention-point retention-point-lost',
+      onPointClick: (index) => openCustomersList('Customers Lost', labels[index], lostCustomers[index] || []),
+    });
+  </script>
+{% endblock %}

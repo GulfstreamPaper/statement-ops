@@ -21,6 +21,17 @@
           </select>
         </div>
         <div>
+          <label>Sales Representative</label>
+          <select name="sales_representative">
+            <option value="">No sales representative</option>
+            {% for sales_rep in sales_representatives %}
+              <option value="{{ sales_rep['name'] }}" {% if (recipient['sales_representative'] or '') == sales_rep['name'] %}selected{% endif %}>
+                {{ sales_rep['name'] }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+        <div>
           <label>Frequency</label>
           <select name="frequency">
             <option value="weekly" {% if recipient['frequency'] == 'weekly' %}selected{% endif %}>Weekly</option>
