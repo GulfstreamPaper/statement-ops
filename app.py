@@ -121,12 +121,23 @@ app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 APP_USERNAME = os.environ.get("APP_USERNAME", "").strip()
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
 BUSINESS_TZ = ZoneInfo("America/New_York")
-UTC_TZ = ZoneInfo("UTC")
 DASHBOARD_CACHE_KEY = "dashboard_main"
 DASHBOARD_CACHE_VERSION = 1
 DASHBOARD_CACHE_LOCK = threading.Lock()
 RETENTION_CACHE_LOCK = threading.Lock()
 RETENTION_CACHE_VERSION = 4
+
+
+def get_business_now():
+    return datetime.now(BUSINESS_TZ)
+
+
+def get_business_date():
+    return get_business_now().date()
+
+
+def get_business_timestamp():
+    return get_business_now().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def ensure_storage():
@@ -395,7 +406,7 @@ def init_db():
         if row["sales_representative"] is not None and str(row["sales_representative"]).strip()
     ]
     if existing_sales_representatives:
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = get_business_timestamp()
         cur.executemany(
             "INSERT OR IGNORE INTO sales_representatives(name, created_at) VALUES (?, ?)",
             [(name, now) for name in existing_sales_representatives],
@@ -560,10 +571,6 @@ def set_setting(key, value):
     conn.close()
 
 
-def get_business_date():
-    return datetime.now(BUSINESS_TZ).date()
-
-
 def get_business_date_str():
     return get_business_date().isoformat()
 
@@ -636,7 +643,7 @@ def load_cached_dashboard_payload(cache_row):
 def save_dashboard_cache(signature, payload):
     conn = get_db()
     cur = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_business_timestamp()
     payload_to_store = dict(payload)
     payload_to_store.pop("dashboard_cached_at", None)
     cur.execute(
@@ -787,7 +794,7 @@ def save_retention_cache_row(month_key, metric, signature):
             signature.get("invoice_mtime"),
             signature.get("invoice_size"),
             RETENTION_CACHE_VERSION,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            get_business_timestamp(),
         ),
     )
     conn.commit()
@@ -1221,7 +1228,7 @@ def save_logo_file(upload_file):
         raise RuntimeError("Unsupported logo type. Use PNG, JPG, or GIF.")
     os.makedirs(LOGO_DIR, exist_ok=True)
     base = safe_filename(os.path.splitext(upload_file.filename)[0])
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = get_business_now().strftime("%Y%m%d_%H%M%S")
     filename = f"{base}_{timestamp}{ext}"
     path = os.path.join(LOGO_DIR, filename)
     upload_file.save(path)
@@ -1371,7 +1378,7 @@ def parse_ship_date(value):
             return ship_dt.date()
     except Exception:
         pass
-    return date.today()
+    return get_business_date()
 
 
 def normalize_name(value):
@@ -1477,7 +1484,7 @@ def record_responsible_assignment(cur, recipient_id, old_responsible_id, new_res
     new_value = parse_int(new_responsible_id, None) if new_responsible_id is not None else None
     if old_value == new_value:
         return
-    changed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    changed_at = get_business_timestamp()
     cur.execute(
         "INSERT INTO responsible_assignment_history(recipient_id, old_responsible_id, new_responsible_id, changed_at, changed_by, source) "
         "VALUES (?, ?, ?, ?, ?, ?)",
@@ -1745,7 +1752,7 @@ def parse_datetime_to_business(value):
     parsed = parse_datetime(value)
     if not parsed:
         return None
-    return parsed.replace(tzinfo=UTC_TZ).astimezone(BUSINESS_TZ)
+    return parsed.replace(tzinfo=BUSINESS_TZ)
 
 
 def business_days_since(value):
@@ -1925,7 +1932,7 @@ def record_notice_send(
     if run_id_required and not run_id:
         run_id = resolve_run_id(None)
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_business_timestamp()
     message_id = normalize_message_id(email_message_id)
     thread_id = normalize_message_id(thread_message_id)
 
@@ -2079,7 +2086,7 @@ def record_notice_invoice_ids(recipient_id, notice_type, invoice_ids):
     if not normalized_ids:
         return
     unique_ids = sorted(set(normalized_ids))
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_business_timestamp()
     conn = get_db()
     cur = conn.cursor()
     cur.executemany(
@@ -2173,7 +2180,7 @@ def get_overdue_run(run_id):
 def save_overdue_report(rows, invoice_file_id, invoice_path, status, error=None):
     conn = get_db()
     cur = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_business_timestamp()
     cur.execute(
         "INSERT INTO overdue_report_runs(invoice_file_id, invoice_path, status, created_at, error) "
         "VALUES (?, ?, ?, ?, ?)",
@@ -3189,7 +3196,7 @@ def get_cached_dashboard_payload():
 
         payload = build_dashboard_payload(signature)
         save_dashboard_cache(signature, payload)
-        payload["dashboard_cached_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        payload["dashboard_cached_at"] = get_business_timestamp()
         return payload
 
 
@@ -3371,7 +3378,7 @@ def import_recipients_from_df(df):
     df = normalize_columns(df)
     conn = get_db()
     cur = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_business_timestamp()
 
     added = 0
     updated = 0
@@ -3464,7 +3471,7 @@ def import_mappings_from_df(df):
     df = normalize_columns(df)
     conn = get_db()
     cur = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_business_timestamp()
 
     added = 0
     updated = 0
@@ -3585,7 +3592,7 @@ def import_bulk_customers_from_upload(upload_file, changed_by="system"):
             sales_representative_key(row["name"]): row["name"] for row in cur.fetchall()
         }
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_business_timestamp()
     added = 0
     updated = 0
     skipped = 0
@@ -3896,12 +3903,12 @@ def generate_invoice_pdf(customer_data, output_path, terms_code):
     pdf.set_font("Arial", "B", 11)
     pdf.cell(40, 8, txt="Statement Date:", ln=0)
     pdf.set_font("Arial", "", 11)
-    pdf.cell(0, 8, txt=datetime.today().strftime("%B %d, %Y"), ln=True)
+    pdf.cell(0, 8, txt=get_business_now().strftime("%B %d, %Y"), ln=True)
     pdf.ln(5)
 
     customer_data = customer_data.copy()
     processed_list = []
-    today = datetime.today().date()
+    today = get_business_date()
     custom_print_ids = get_custom_print_invoice_ids()
 
     for _, row in customer_data.iterrows():
@@ -4212,7 +4219,7 @@ SCHEDULE_WORKER_THREAD = None
 
 
 def now_ts():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return get_business_timestamp()
 
 
 def parse_json_list(value):
@@ -4242,7 +4249,7 @@ def get_setting_float(key, default=0.0, min_value=None, max_value=None):
 
 def get_due_recipients(today=None):
     if today is None:
-        today = date.today()
+        today = get_business_date()
     conn = get_db()
     cur = conn.cursor()
     cur.execute("SELECT * FROM recipients ORDER BY group_name ASC")
@@ -4296,7 +4303,7 @@ def get_recent_scheduled_jobs(limit=10):
 
 def create_scheduled_job(requested_by="system"):
     invoice_file_id, invoice_path = get_invoice_for_run()
-    due_recipients = get_due_recipients(date.today())
+    due_recipients = get_due_recipients(get_business_date())
 
     max_recipients = parse_int(get_setting("scheduled_max_recipients", "0"), 0, 0)
     if max_recipients > 0:
@@ -4336,7 +4343,7 @@ def create_scheduled_job(requested_by="system"):
 def claim_next_scheduled_job():
     now = now_ts()
     stale_seconds = parse_int(get_setting("scheduled_stale_seconds", "900"), 900, 60)
-    stale_cutoff = (datetime.now() - timedelta(seconds=stale_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+    stale_cutoff = (get_business_now() - timedelta(seconds=stale_seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_db()
     cur = conn.cursor()
@@ -4736,7 +4743,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type, preloa
     run_id = None
     conn = get_db()
     cur = conn.cursor()
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = get_business_timestamp()
     cur.execute(
         "INSERT INTO statement_runs(recipient_id, invoice_file_id, run_type, status, created_at) VALUES (?, ?, ?, ?, ?)",
         (recipient["id"], invoice_file_id, run_type, "started", now),
@@ -4751,7 +4758,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type, preloa
 
         os.makedirs(OUT_DIR, exist_ok=True)
         safe_name = "".join([c for c in recipient["group_name"] if c.isalnum() or c in (" ", "-", "_")]).strip()
-        filename = f"{safe_name}_Statement_{date.today().strftime('%Y%m%d')}.pdf"
+        filename = f"{safe_name}_Statement_{get_business_date().strftime('%Y%m%d')}.pdf"
         output_path = os.path.join(OUT_DIR, filename)
 
         terms_code = recipient["terms_code"] or normalize_terms_code(recipient["net_terms"]) or "net_30"
@@ -4759,7 +4766,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type, preloa
         if not ok:
             raise RuntimeError("No outstanding invoices to include")
 
-        subject = f"Statement of Open Invoices {date.today().strftime('%m/%d/%Y')}"
+        subject = f"Statement of Open Invoices {get_business_date().strftime('%m/%d/%Y')}"
         body = get_email_template_body("statement")
         recipient_email = normalize_email_value(recipient["email_to"])
         if not recipient_email:
@@ -4774,7 +4781,7 @@ def run_for_recipient(recipient, invoice_path, invoice_file_id, run_type, preloa
         )
         cur.execute(
             "UPDATE recipients SET last_sent = ? WHERE id = ?",
-            (date.today().strftime("%Y-%m-%d"), recipient["id"]),
+            (get_business_date().strftime("%Y-%m-%d"), recipient["id"]),
         )
         conn.commit()
         conn.close()
@@ -4809,7 +4816,7 @@ def build_statement_pdf(recipient, invoice_path):
 
     os.makedirs(OUT_DIR, exist_ok=True)
     safe_name = "".join([c for c in recipient["group_name"] if c.isalnum() or c in (" ", "-", "_")]).strip()
-    filename = f"{safe_name}_Statement_{date.today().strftime('%Y%m%d')}.pdf"
+    filename = f"{safe_name}_Statement_{get_business_date().strftime('%Y%m%d')}.pdf"
     output_path = os.path.join(OUT_DIR, filename)
 
     terms_code = recipient["terms_code"] or normalize_terms_code(recipient["net_terms"]) or "net_30"
@@ -4878,7 +4885,7 @@ def index():
     customer_count = cur.fetchone()[0]
     cur.execute("SELECT COUNT(*) FROM recipients WHERE recipient_type = 'group'")
     group_count = cur.fetchone()[0]
-    cutoff = (datetime.now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (get_business_now() - timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
     cur.execute(
         "SELECT sr.*, r.group_name FROM statement_runs sr "
         "JOIN recipients r ON r.id = sr.recipient_id "
@@ -4893,7 +4900,7 @@ def index():
     active_schedule_job = get_active_scheduled_job()
     schedule_jobs = get_recent_scheduled_jobs(limit=20)
 
-    today = date.today()
+    today = get_business_date()
     grouped_customer_ids = get_grouped_customer_ids()
     due = [
         r
@@ -4926,7 +4933,7 @@ def customer_retention():
 
 @app.route("/overdue-report")
 def overdue_report():
-    today = date.today()
+    today = get_business_date()
     run = get_latest_overdue_run()
     active_tab = normalize_autopay_filter(request.args.get("tab"), default="none")
     responsibles = get_responsibles()
@@ -5126,7 +5133,7 @@ def overdue_report_export():
         df.to_excel(writer, index=False, sheet_name="overdue_report")
     output.seek(0)
 
-    filename = f"overdue_report_{date.today().strftime('%Y%m%d')}.xlsx"
+    filename = f"overdue_report_{get_business_date().strftime('%Y%m%d')}.xlsx"
     return send_file(
         output,
         as_attachment=True,
@@ -5312,7 +5319,7 @@ def overdue_report_skipped(recipient_id):
             )
 
         statement_path = build_statement_pdf(recipient, invoice_path)
-        subject = f"Skipped Invoice Notifcation {date.today().strftime('%m/%d/%Y')}"
+        subject = f"Skipped Invoice Notifcation {get_business_date().strftime('%m/%d/%Y')}"
         body = get_email_template_body("skipped")
         message_id = send_email(
             recipient["email_to"],
@@ -5396,7 +5403,7 @@ def overdue_report_short_paid(recipient_id):
             )
 
         statement_path = build_statement_pdf(recipient, invoice_path)
-        subject = f"Partial Payment Notification {date.today().strftime('%m/%d/%Y')}"
+        subject = f"Partial Payment Notification {get_business_date().strftime('%m/%d/%Y')}"
         body = get_email_template_body("short_paid")
         message_id = send_email(
             recipient["email_to"],
@@ -5571,7 +5578,7 @@ def customers_export():
         )
     output.seek(0)
 
-    filename = f"customers_export_{date.today().strftime('%Y%m%d')}.xlsx"
+    filename = f"customers_export_{get_business_date().strftime('%Y%m%d')}.xlsx"
     return send_file(
         output,
         as_attachment=True,
@@ -5587,7 +5594,7 @@ def customers():
         form_type = request.form.get("form_type", "")
         conn = get_db()
         cur = conn.cursor()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = get_business_timestamp()
 
         if form_type == "create_single":
             customer_name = request.form.get("customer_name", "").strip()
@@ -5789,7 +5796,7 @@ def customers():
                 flash("Merge is only available for single customers.", "error")
                 return redirect(url_for("customers"))
 
-            now_merge = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_merge = get_business_timestamp()
             source_name = normalize_name(source["group_name"])
             target_name = normalize_name(target["group_name"])
 
@@ -6026,7 +6033,7 @@ def edit_customer(recipient_id):
             if valid_ids:
                 placeholders = ",".join(["?"] * len(valid_ids))
                 cur.execute(f"DELETE FROM group_members WHERE customer_id IN ({placeholders})", valid_ids)
-                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                now = get_business_timestamp()
                 cur.executemany(
                     "INSERT OR IGNORE INTO group_members(group_id, customer_id, created_at) VALUES (?, ?, ?)",
                     [(recipient_id, cid, now) for cid in valid_ids],
@@ -6100,7 +6107,7 @@ def custom_print_invoices():
 
         conn = get_db()
         cur = conn.cursor()
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = get_business_timestamp()
         try:
             cur.execute(
                 "INSERT INTO custom_print_invoices(invoice_id, created_at) VALUES (?, ?)",
@@ -6174,7 +6181,7 @@ def uploads():
             return redirect(url_for("uploads"))
 
         os.makedirs(UPLOAD_DIR, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = get_business_now().strftime("%Y%m%d_%H%M%S")
         filename = f"{timestamp}_{file.filename}"
         path = os.path.join(UPLOAD_DIR, filename)
         file.save(path)
@@ -6183,7 +6190,7 @@ def uploads():
         cur = conn.cursor()
         cur.execute(
             "INSERT INTO invoice_files(filename, path, uploaded_at) VALUES (?, ?, ?)",
-            (file.filename, path, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+            (file.filename, path, get_business_timestamp()),
         )
         conn.commit()
         conn.close()
@@ -6338,7 +6345,7 @@ def settings():
             cur.execute("SELECT color FROM responsibles")
             existing_colors = [row["color"] for row in cur.fetchall()]
             color = pick_responsible_color(existing_colors)
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = get_business_timestamp()
             cur.execute(
                 "INSERT INTO responsibles(name, color, created_at) VALUES (?, ?, ?)",
                 (responsible_name, color, now),
@@ -6395,7 +6402,7 @@ def settings():
                 flash("That Sales Representative already exists.", "error")
                 return redirect(url_for("settings", tab="staff"))
 
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now = get_business_timestamp()
             cur.execute(
                 "INSERT INTO sales_representatives(name, created_at) VALUES (?, ?)",
                 (sales_rep_name, now),
